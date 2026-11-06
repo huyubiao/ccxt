@@ -132,6 +132,9 @@ button {
   padding: 0 10px;
   font-size: 12px;
 }
+.markets-link {
+  text-decoration: none;
+}
 
 /* ---- Select ---- */
 .select {
@@ -714,10 +717,8 @@ button {
   display: none;
 }
 
-@media (max-width: 1110px) {
-  /* Topbar becomes two rows: brand + actions, then language tabs + examples.
-     1110px = the single-row topbar's intrinsic width; below it the trailing
-     Run button clips under .topbar's overflow:hidden. */
+@media (max-width: 1200px) {
+  /* Keep the trailing actions visible when the toolbar wraps. */
   .topbar {
     flex-wrap: wrap;
     height: auto;
@@ -735,10 +736,11 @@ button {
   .brand .sub {
     display: none;
   }
-  .topbar > button {
+  .topbar > button,
+  .topbar > .markets-link {
     order: 2;
   }
-  .topbar > button:first-of-type {
+  .topbar > .markets-link {
     margin-left: auto;
   }
   /* Zero-height full-width item: forces the following controls onto row 2. */

@@ -29,6 +29,11 @@ code for you.
 
 ## Quick start
 
+On Windows, double-click `start-playground.cmd` at the repository root. When
+the server is ready, open <http://127.0.0.1:3000/>. From a terminal, pass a
+different port as the first argument if needed, for example
+`start-playground.cmd 3001`.
+
 ```bash
 cd docs/playground
 npm install
@@ -37,9 +42,26 @@ cp .env.example .env.local    # set PLAYGROUND_AI_URL for the AI panel
 npm run dev                   # http://localhost:3000
 ```
 
-Press **Run** (or ⌘/Ctrl+Enter) to execute the snippet. Switch languages with
-the tabs, load ready-made snippets from **Examples…**, and toggle the AI panel
-from the toolbar.
+The local homepage lists coins with an active USDT-margined perpetual
+contract on Binance. Select a coin and switch platforms to view its
+USDT-quoted pairs across Binance, Coinbase, and OKX. The USDT filter also
+applies to Binance Alpha. Markets with multiple pairs offer a pair selector.
+Alpha pairs are grouped by coin symbol and include their Binance ID and,
+when available, their chain and token address to distinguish same-name tokens.
+
+The app refreshes the lists every 15 seconds and also reacts to Binance
+futures `!contractInfo` notifications. Futures and spot show taker buy
+and sell turnover. Alpha shows total turnover because its public trade
+direction field is deprecated. The 5-second, 30-second, and 1-minute
+windows refresh every second from live trades. The 5-minute, 1-hour,
+24-hour, and 7-day windows refresh after each closed minute.
+Coinbase and OKX show buy and sell turnover for short windows and totals
+for longer windows. Coinbase spot estimates long-window turnover from each
+candle's closing price and base volume.
+
+On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
+execute a snippet. Switch languages with the tabs and load ready-made snippets
+from **Examples…**.
 
 ## Deploy with Docker (recommended for any shared/public host)
 

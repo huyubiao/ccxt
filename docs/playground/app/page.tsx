@@ -14,7 +14,8 @@ import {
   type RunnableLanguageId,
 } from "@/lib/languages";
 import { examples, defaultExample, codeFor } from "@/lib/examples";
-import { apiUrl } from "@/lib/basePath";
+import { apiUrl, BASE_PATH } from "@/lib/basePath";
+import MarketsPage from "./markets/page";
 
 type Theme = "light" | "dark";
 
@@ -27,6 +28,11 @@ function initialCode(): Record<RunnableLanguageId, string> {
 }
 
 export default function Page() {
+  // The upstream docs deployment serves the code editor at /playground.
+  return BASE_PATH === "/playground" ? <Playground /> : <MarketsPage />;
+}
+
+function Playground() {
   const [language, setLanguage] = useState<LanguageId>("ts");
   const [codeByLang, setCodeByLang] = useState<Record<RunnableLanguageId, string>>(initialCode);
   const [run, setRun] = useState<RunState>({ status: "idle" });

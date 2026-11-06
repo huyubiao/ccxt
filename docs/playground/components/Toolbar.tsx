@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { languages, type LanguageId } from "@/lib/languages";
 import { examples } from "@/lib/examples";
 import Logo from "./Logo";
@@ -74,6 +75,10 @@ export default function Toolbar({
       </select>
 
       <div className="toolbar-spacer" />
+
+      <Link className="btn btn-outline markets-link" href="/markets">
+        Markets
+      </Link>
 
       <button
         className="btn btn-icon btn-ghost"

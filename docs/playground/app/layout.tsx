@@ -1,10 +1,14 @@
 import type { Metadata, Viewport } from "next";
+import { BASE_PATH } from "@/lib/basePath";
 import "./globals.css";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = BASE_PATH === "/playground" ? {
   title: "CCXT Playground",
   description:
     "Run CCXT against live public exchange endpoints in TypeScript, Python and PHP — with an AI assistant.",
+} : {
+  title: "CCXT Markets",
+  description: "按币种查看币安、Coinbase 和 OKX 的公开行情与成交额。",
 };
 
 export const viewport: Viewport = {
@@ -18,7 +22,7 @@ const themeScript = `(function(){try{var q=new URLSearchParams(location.search).
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={BASE_PATH === "/playground" ? "en" : "zh-CN"} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
