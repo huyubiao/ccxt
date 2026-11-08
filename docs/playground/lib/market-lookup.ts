@@ -15,9 +15,9 @@ export type ContractDirectory = {
 
 export const marketKinds = ["futures", "spot", "alpha"] as const;
 export type MarketKind = (typeof marketKinds)[number];
-export const marketExchanges = ["binance", "coinbase", "okx"] as const;
+export const marketExchanges = ["binance", "okx"] as const;
 export type MarketExchange = (typeof marketExchanges)[number];
-export const exchangeLabels: Record<MarketExchange, string> = { binance: "币安", coinbase: "Coinbase", okx: "OKX" };
+export const exchangeLabels: Record<MarketExchange, string> = { binance: "币安", okx: "OKX" };
 
 export function parseMarketExchange(value: string | null): MarketExchange | undefined {
   return value === null ? "binance" : marketExchanges.find((exchange) => exchange === value);
@@ -62,6 +62,7 @@ export type VolumeWindow = {
   period: "5s" | "30s" | "1m" | "5m" | "1h" | "24h" | "7d";
   amounts: TradeAmounts | null;
   total?: number | null;
+  asOf?: number;
 };
 
 export type MarketVolume = {

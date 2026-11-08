@@ -17,3 +17,4 @@ runtime/
 # misc
 .DS_Store
 *.log
+.cache/holders/

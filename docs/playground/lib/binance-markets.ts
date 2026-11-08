@@ -142,6 +142,12 @@ export async function getMarketInstrument(kind: MarketKind, symbol: string, exch
   return listing.instruments.find(({ id }) => id === symbol);
 }
 
+export async function findOkxPerpetual(pair: MarketInstrument) {
+  const listing = await getListing("okx", "futures", CONTRACT_REFRESH_MS);
+  const matches = listing.instruments.filter(({ coin, quote }) => coin === pair.coin && quote === pair.quote);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 type KlineParams = { interval: string; startTime: number; endTime: number; limit: number };
 
 export async function getKlines({ kind, id: symbol }: MarketInstrument, params: KlineParams): Promise<unknown[][]> {

@@ -1,0 +1,13 @@
+{
+  "ETHUSDT": {
+    "symbol": "ETH",
+    "supplyLimit": "unlimited",
+    "mechanism": "proof-of-stake",
+    "recipients": "验证者",
+    "hasFixedHalving": false,
+    "hasFeeBurn": true,
+    "sourceName": "ethereum.org",
+    "sourceUrl": "https://ethereum.org/what-is-ether/supply/",
+    "reviewedAt": 1794009600000
+  }
+}

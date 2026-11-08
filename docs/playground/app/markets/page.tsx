@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import MarketMonitor from "./market-monitor";
 import Logo from "@/components/Logo";
 import { apiUrl } from "@/lib/basePath";
 import {
@@ -46,9 +47,8 @@ type Coin = { symbol: string; markets: Record<MarketExchange, MarketInstrument[]
 
 export default function MarketsPage() {
   const binance = useMarketDirectory("binance");
-  const coinbase = useMarketDirectory("coinbase");
   const okx = useMarketDirectory("okx");
-  const platforms = { binance, coinbase, okx };
+  const platforms = { binance, okx };
   const [exchange, setExchange] = useState<MarketExchange>("binance");
   const [filter, setFilter] = useState("");
   const [selection, setSelection] = useState<string | null>(null);
@@ -56,10 +56,10 @@ export default function MarketsPage() {
   const coins = useMemo(() => {
     const grouped = new Map<string, Coin>();
     for (const { coin } of binance.directory?.futures.instruments ?? []) {
-      if (!grouped.has(coin)) grouped.set(coin, { symbol: coin, markets: { binance: [], coinbase: [], okx: [] } });
+      if (!grouped.has(coin)) grouped.set(coin, { symbol: coin, markets: { binance: [], okx: [] } });
     }
     for (const [platform, directory] of [
-      ["binance", binance.directory], ["coinbase", coinbase.directory], ["okx", okx.directory],
+      ["binance", binance.directory], ["okx", okx.directory],
     ] as const) {
       if (!directory) continue;
       for (const kind of marketKinds) {
@@ -73,7 +73,7 @@ export default function MarketsPage() {
       return index < 0 ? preferredCoins.length : index;
     };
     return [...grouped.values()].sort((a, b) => rank(a.symbol) - rank(b.symbol) || a.symbol.localeCompare(b.symbol));
-  }, [binance.directory, coinbase.directory, okx.directory]);
+  }, [binance.directory, okx.directory]);
 
   const coin = coins.find(({ symbol }) => symbol === selection);
   const referenceContract = coin?.markets.binance.filter((pair) => pair.kind === "futures").sort(prioritizePair)[0];
@@ -96,19 +96,31 @@ export default function MarketsPage() {
     <main className={styles.page} lang="zh-CN">
       <header className={styles.header}>
         <div className={styles.brand}><Logo size={22} /> CCXT</div>
+        <nav className={styles.sectionNav} aria-label="页面板块">
+          <a href="#market-alerts">监控币种</a>
+          <a href="#coin-research">币种深度调研</a>
+        </nav>
       </header>
 
       <div className={styles.content}>
         <div className={styles.intro}>
-          <p className={styles.eyebrow}>BINANCE · COINBASE · OKX</p>
+          <p className={styles.eyebrow}>BINANCE · OKX</p>
           <h1>币种行情</h1>
-          <p>选择有币安 USDT 本位永续合约的币种。各平台仅显示 USDT 报价交易对。</p>
+          <p>监控币安合约价格异动，查看币安和 OKX 的币种详情。</p>
         </div>
 
-        <div className={styles.workspace}>
+        <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
+          <h2 id="market-alert-heading" className={styles.sectionTitle}>监控币种</h2>
+          <MarketMonitor />
+        </section>
+        <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
+          <div className={styles.researchHeading}>
+            <h2 id="coin-research-heading" className={styles.sectionTitle}>币种深度调研</h2>
+            <p>选择有币安 USDT 本位永续合约的币种，查看市值、代币解锁、最新成交价和成交额。各平台仅显示 USDT 报价交易对。</p>
+          </div>
           <section className={styles.directory} aria-label="可交易币种">
             <div className={styles.directoryHeader}>
-              <h2>可交易币种</h2>
+              <h3>可交易币种</h3>
               {hasDirectory && <span>{visible.length} / {coins.length}</span>}
             </div>
             <input
@@ -143,7 +155,7 @@ export default function MarketsPage() {
           <section aria-label="行情结果" className={styles.results}>
             {coin ? (
               <>
-                <h2 className={styles.coinTitle}>{coin.symbol} 行情</h2>
+                <h3 className={styles.coinTitle}>{coin.symbol} 行情</h3>
                 {referenceContract && <CoinFundamentals key={referenceContract.id} symbol={referenceContract.id} />}
                 <div className={styles.platforms} role="group" aria-label="交易平台">
                   {marketExchanges.map((venue) => (
@@ -172,7 +184,7 @@ export default function MarketsPage() {
               </div>
             )}
           </section>
-        </div>
+        </section>
       </div>
     </main>
   );
@@ -196,9 +208,6 @@ function MarketPanel({ kind, pairs, listing }: { kind: MarketKind; pairs: Market
               </select>
             </label>
           ) : <p className={styles.pairLabel}>{pairLabel(pair)}</p>}
-          {pair.exchange === "coinbase" && kind === "futures" && (
-            <p className={styles.address}>行情来源 Deribit by Coinbase</p>
-          )}
           {pair.kind === "alpha" && pair.address && (
             <p className={styles.address} title={pair.address}>代币地址：{pair.address}</p>
           )}
@@ -307,7 +316,14 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
     };
   }, [exchange, kind, symbol]);
 
-  const windows = [...live.windows, ...(history?.windows ?? emptyHistory)];
+  const closedMinute = history?.windows.find(({ period }) => period === "1m");
+  const useClosedMinute = closedMinute?.total != null &&
+    live.windows.some(({ period, amounts }) => period === "1m" && amounts === null);
+  const windows = [
+    ...live.windows.map((window) => useClosedMinute && window.period === "1m" ? closedMinute : window),
+    ...(history?.windows.filter(({ period }) => period !== "1m") ?? emptyHistory)
+      .map((window) => live.closedWindows.find(({ period }) => period === window.period) ?? window),
+  ];
   const turnoverLabel = totalOnly ? "总成交额" : external ? "成交额" : "主动买卖成交额";
 
   return (
@@ -324,9 +340,12 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
             </>}
           </tr></thead>
           <tbody>
-            {windows.map(({ period, amounts, total }) => (
+            {windows.map(({ period, amounts, total, asOf }) => (
               <tr key={period}>
-                <th scope="row">{periodLabels[period]}</th>
+                <th scope="row">
+                  {useClosedMinute && period === "1m" ? "上一根已收盘 1 分钟 K 线" : periodLabels[period]}
+                  {asOf != null && <small>截至 {timeFormat.format(asOf)}</small>}
+                </th>
                 {totalOnly ? <td>{total != null ? turnoverFormat.format(total) : "—"}</td> : <>
                   <td className={styles.buy}>{amounts ? turnoverFormat.format(amounts.buy) : "—"}</td>
                   <td className={styles.sell}>{amounts ? turnoverFormat.format(amounts.sell) : "—"}</td>
@@ -340,11 +359,12 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
       </div>
       {live.asOf !== undefined ? <p>短区间每秒更新 · <time dateTime={new Date(live.asOf).toISOString()}>{timeFormat.format(live.asOf)}</time></p>
         : <p role="status">{live.reconnecting ? "正在重连并补齐短区间成交…" : "正在同步最近一分钟的成交…"}</p>}
-      {history && <p>长区间按已收盘 K 线统计 · <time dateTime={new Date(history.asOf).toISOString()}>{timeFormat.format(history.asOf)}</time></p>}
+      {history && <p>{external ? "未单独标注时间的长区间总额按已收盘 K 线统计" : "长区间按已收盘 K 线统计"} · <time dateTime={new Date(history.asOf).toISOString()}>{timeFormat.format(history.asOf)}</time></p>}
       {error && <p role="status">长区间同步失败，稍后会自动重试。</p>}
       {totalOnly && <p>Alpha 公开成交数据的方向字段已弃用，仅统计总成交额。</p>}
-      {external && <p>长区间按公开 K 线统计总额，方向栏留空。{exchange === "coinbase" && kind === "spot" &&
-        "现货长区间成交额以 K 线收盘价乘以成交量估算。"}</p>}
+      {external && (kind === "spot"
+        ? <p>现货主动买卖额从本次连接起累计，覆盖完整区间后显示。断线重连后重新累计。</p>
+        : <p>永续合约长区间的主动买卖额来自 OKX 已结束的统计周期，截止时间见各行。</p>)}
       {windows.some(({ amounts, total }) => total == null && amounts === null) && <p>— 表示该时段暂无完整成交额或换算数据。</p>}
     </section>
   );
@@ -352,8 +372,6 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
 
 function Quote({ pair, quote }: { pair: MarketInstrument; quote: MarketQuote }) {
   const metrics = [
-    { label: "最优买价", value: formatNumber(quote.bid) },
-    { label: "最优卖价", value: formatNumber(quote.ask) },
     { label: "24 小时涨跌幅", value: quote.changePercent === null ? "—" : `${percentFormat.format(quote.changePercent)}%` },
     { label: `24 小时成交量（${pair.base}）`, value: formatNumber(quote.baseVolume) },
   ];

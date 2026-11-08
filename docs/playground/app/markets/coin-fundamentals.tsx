@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
-import type { CoinOverview, CoinUnlock, UnlockAllocation } from "@/lib/coin-overview";
+import type { CoinOverview, CoinUnlock, Tokenomics, UnlockAllocation } from "@/lib/coin-overview";
 import styles from "./markets.module.css";
+import CoinHolders from "./coin-holders";
 
 const dollars = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 const tokens = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 });
@@ -28,7 +29,9 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
     <>
       <dl className={styles.metrics}>
         <div><dt>{unlock.mechanism === "linear" ? "下次计划释放（线性）" : "下次计划解锁"}</dt>
-          <dd><time dateTime={new Date(unlock.time).toISOString()}>{time.format(unlock.time)}</time></dd></div>
+          <dd>{unlock.timeKind === "interval-estimate" && unlock.periodStart != null
+            ? `${time.format(unlock.periodStart)} 至 ${time.format(unlock.time)}（区间估算）`
+            : <time dateTime={new Date(unlock.time).toISOString()}>{time.format(unlock.time)}</time>}</dd></div>
         <div><dt>解锁数量</dt><dd>{tokens.format(unlock.amount)} {coin}</dd></div>
         <div><dt>解锁估值</dt><dd>{usd(price === null ? null : unlock.amount * price)}</dd></div>
       </dl>
@@ -62,6 +65,76 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
   );
 }
 
+function SupplySchedule({ data, price }: { data: Tokenomics; price: number | null }) {
+  if (data.kind === "staking" && data.staking) {
+    const staking = data.staking;
+    return <>
+      <dl className={styles.metrics}>
+        <div><dt>发行机制</dt><dd>权益证明（PoS）持续发行</dd></div>
+        <div><dt>新增发行分配给</dt><dd>{staking.recipients}</dd></div>
+        <div><dt>每日新增发行</dt><dd>{staking.dailyIssuance === null ? "随网络状态变化，暂未取得日统计" : `${tokens.format(staking.dailyIssuance)} ${data.symbol}`}</dd></div>
+        <div><dt>下一次减半</dt><dd>无固定减半计划</dd></div>
+        <div><dt>手续费销毁</dt><dd>{staking.hasFeeBurn ? "按协议销毁基础费用" : "未启用"}</dd></div>
+      </dl>
+      <p className={styles.fundamentalsNote}>新增发行随质押总量及验证者参与情况变化。净供应变化 = 新增发行 − 销毁量。</p>
+      <a className={styles.fundamentalsLink} href={data.sourceUrl} target="_blank" rel="noreferrer">{data.sourceName} 发行与销毁说明</a>
+    </>;
+  }
+  if (data.kind === "mining") {
+    const mining = data.mining;
+    return <>
+      <p className={styles.fundamentalsNote}>通过区块奖励持续发行，分配给矿工。</p>
+      {mining ? <>
+        <dl className={styles.metrics}>
+          <div><dt>每区块新发行（快照）</dt><dd>{tokens.format(mining.blockReward)} {data.symbol}</dd></div>
+          <div><dt>每日新增（估算）</dt><dd>{tokens.format(mining.estimatedDailyIssuance)} {data.symbol}</dd></div>
+          <div><dt>下一次减半（预计）</dt><dd><time dateTime={new Date(mining.estimatedHalvingTime).toISOString()}>{time.format(mining.estimatedHalvingTime)}</time></dd></div>
+          <div><dt>减半目标高度</dt><dd>{mining.nextHalvingHeight.toLocaleString()}</dd></div>
+          <div><dt>减半后每区块新发行</dt><dd>{tokens.format(mining.nextBlockReward)} {data.symbol}</dd></div>
+          <div><dt>减半后每日新增（估算）</dt><dd>{tokens.format(mining.nextEstimatedDailyIssuance)} {data.symbol}</dd></div>
+        </dl>
+        <p className={styles.fundamentalsNote}>按目标出块间隔估算，实际每日发行量随出块数量变化。减半由区块高度决定。
+          估算基于区块 {mining.blockHeight.toLocaleString()}，快照日期 {time.format(data.updatedAt)}。
+        </p>
+        <a className={styles.fundamentalsLink} href={mining.heightSourceUrl} target="_blank" rel="noreferrer">区块高度来源</a>{" · "}
+      </> : <p className={styles.fundamentalsNote}>尚未取得区块高度快照，暂无法核实当前奖励和减半估算。</p>}
+      <a className={styles.fundamentalsLink} href={data.sourceUrl} target="_blank" rel="noreferrer">{data.sourceName} 发行规则</a>
+    </>;
+  }
+  return <>
+    <dl className={styles.metrics}>
+      <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未披露" : `${tokens.format(data.lockedAmount)} ${data.symbol}`}</dd></div>
+    </dl>
+    <div className={styles.tableScroll}>
+      <table className={styles.unlockTable}>
+        <thead><tr><th scope="col">未来解锁时间</th><th scope="col">数量 ({data.symbol})</th><th scope="col">占总量</th></tr></thead>
+        <tbody>{[0, 1, 2].map((index) => {
+          const event = data.events[index];
+          return <tr key={index}>
+            <th scope="row">{event ? event.timeKind === "interval-estimate" && event.periodStart != null
+              ? <>{time.format(event.periodStart)} 至<small>{time.format(event.time)}（区间估算）</small></>
+              : <time dateTime={new Date(event.time).toISOString()}>{time.format(event.time)}</time> : `第 ${index + 1} 次待补充`}</th>
+            <td>{event ? tokens.format(event.amount) : "—"}</td>
+            <td>{event?.supplyPercentage == null ? "—" : `${event.supplyPercentage.toFixed(4)}%`}</td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>
+    {data.percentageSupply !== null && <p className={styles.fundamentalsNote}>
+      占比按{data.percentageBasis === "maxSupply" ? "供应上限" : "快照总供应量"} {tokens.format(data.percentageSupply)} {data.symbol} 计算。
+    </p>}
+    {data.events.map((event) => <details key={event.time}>
+      <summary>{time.format(event.time)} {event.timeKind === "interval-estimate" ? "区间释放分配估算" : "解锁分配明细"}</summary>
+      <Allocation unlock={event} price={price} />
+    </details>)}
+    {data.kind === "unknown" && <p className={styles.fundamentalsNote}>发行或锁仓计划尚未核实。</p>}
+    {data.events.length < 3 && <p className={styles.fundamentalsNote}>目前来源仅提供 {data.events.length} 次可核实的未来事件，缺少的期次待补充。</p>}
+    {data.events.some((event) => event.timeKind === "interval-estimate") && <p className={styles.fundamentalsNote}>
+      区间估算来自释放曲线相邻采样点的增量，实际解锁可能发生在区间内的不同时间。
+    </p>}
+  </>;
+}
+
 export default function CoinFundamentals({ symbol }: { symbol: string }) {
   const [data, setData] = useState<CoinOverview | null>(null);
   const [error, setError] = useState(false);
@@ -93,35 +166,41 @@ export default function CoinFundamentals({ symbol }: { symbol: string }) {
   }, [symbol]);
 
   const market = data?.market;
-  const unlock = data?.unlock && data.unlock.time > Date.now() ? data.unlock : null;
-  const status = data?.status === "not-applicable" ? "该资产没有适用的代币市值和解锁数据。"
-    : data?.status === "unmapped" ? "暂无可核实的币种资料。" : null;
+  const snapshotAt = data?.tokenomics?.updatedAt ?? data?.unlockSnapshotAt;
   return (
-    <section className={`${styles.result} ${styles.fundamentals}`} aria-label="市值与代币解锁">
-      <h3 className={styles.marketTitle}>市值与代币解锁</h3>
-      {status ? <p className={styles.fundamentalsNote}>{status}</p> : (
+    <section className={`${styles.result} ${styles.fundamentals}`} aria-label="代币详情">
+      <h3 className={styles.marketTitle}>代币详情</h3>
+      {data?.status === "not-applicable" ? <p className={styles.fundamentalsNote}>该资产没有适用的代币市值和解锁数据。</p> : (
         <div className={styles.fundamentalsGrid}>
           <div>
             <h4>市值</h4>
             <dl className={styles.metrics}>
               <div><dt>流通市值</dt><dd>{usd(market?.circulatingMarketCap ?? null)}</dd></div>
-              <div><dt>总市值</dt><dd>{usd(market?.totalMarketCap ?? null)}</dd></div>
+              <div><dt>总市值（按供应上限）</dt><dd>{(market?.supplyLimit ?? data?.tokenomics?.supplyLimit) === "unlimited"
+                ? "无上限" : usd(market?.totalMarketCap ?? null)}</dd></div>
             </dl>
             {market && <p className={styles.fundamentalsNote}>
-              总市值 = 当前价格 × 总供应量。
+              总市值按当前价格 × 供应上限估算，供应上限未核实时显示 —。
               {market.updatedAt !== null && <>截至 <time dateTime={new Date(market.updatedAt).toISOString()}>{time.format(market.updatedAt)}</time>。</>}
             </p>}
             {market && <a className={styles.fundamentalsLink} href={market.sourceUrl} target="_blank" rel="noreferrer">{market.sourceName} 市值来源</a>}
             {(error || data?.marketError) && <p className={styles.fundamentalsNote} role="status">市值同步失败，稍后重试。</p>}
-            {data && !market && !data.marketError && <p className={styles.fundamentalsNote}>暂无市值数据。</p>}
+            {data && !market && !data.marketError && <p className={styles.fundamentalsNote}>
+              {data.status === "unmapped" ? "暂无可核实的币种市值资料。" : "暂无市值数据。"}
+            </p>}
           </div>
           <div>
-            <h4>下一次解锁与分配</h4>
-            {unlock ? <Allocation unlock={unlock} price={market?.price ?? null} />
+            <h4>解锁与分配</h4>
+            {data?.tokenomics ? <SupplySchedule data={data.tokenomics} price={market?.price ?? null} />
               : <p className={styles.fundamentalsNote} role="status">
-                {error || data?.unlockError ? "解锁资料同步失败，稍后重试。" : data ? "暂无已核实的未来解锁记录。" : "正在查询解锁资料…"}
+                {data ? "本地快照没有该币种的未来解锁记录，或记录已到期。"
+                  : error ? "暂时无法读取解锁快照。" : "正在读取解锁快照…"}
               </p>}
+            {snapshotAt != null && <p className={styles.fundamentalsNote}>{data?.tokenomics?.kind === "staking" ? "发行规则核对于" : "本地快照更新于"}{" "}
+              <time dateTime={new Date(snapshotAt).toISOString()}>{time.format(snapshotAt)}</time>。
+            </p>}
           </div>
+          <CoinHolders key={symbol} symbol={symbol} />
         </div>
       )}
     </section>

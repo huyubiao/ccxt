@@ -2,15 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
-import { coinbasePerpetualTrade, coinbaseSpotTrade, okxTrade } from "@/lib/external-trades";
+import { okxTrade } from "@/lib/external-trades";
 import {
   MINUTE_MS, VOLUME_DELAY_MS, parseAggregateTrade, shortPeriods, sumShortVolume,
   type RecentTrade, type RecentVolumeSeed,
 } from "@/lib/short-volume";
-import type { MarketInstrument, VolumeWindow } from "@/lib/market-lookup";
+import type { MarketInstrument, TradeAmounts, VolumeWindow } from "@/lib/market-lookup";
 
-type LiveVolume = { asOf: number; windows: VolumeWindow[] };
+type LiveVolume = { asOf: number; windows: VolumeWindow[]; closedWindows: VolumeWindow[] };
 const emptyWindows: VolumeWindow[] = shortPeriods.map(({ period }) => ({ period, amounts: null }));
+const closedPeriods = [["5m", 5], ["1h", 60], ["24h", 1440], ["7d", 10080]] as const;
 const streamEndpoints = {
   futures: "wss://fstream.binance.com/market/ws",
   spot: "wss://data-stream.binance.vision/ws",
@@ -27,7 +28,12 @@ export function useLiveVolume(pair: MarketInstrument) {
     const trades = new Map<number, RecentTrade>();
     const alpha = kind === "alpha";
     const external = exchange !== "binance";
-    const coinbasePerpetual = exchange === "coinbase" && kind === "futures";
+    const collectClosed = exchange === "okx" && kind === "spot";
+    const closedMinutes = new Map<number, TradeAmounts>();
+    let connectedAt = Infinity;
+    let archivedBefore = -Infinity;
+    let closedAsOf = -Infinity;
+    let closedWindows: VolumeWindow[] = [];
     let coveredFrom = -Infinity;
     let seedCutoff: number | undefined;
     let rates: Map<number, number> | null = quote === "USDT" ? null : new Map();
@@ -42,10 +48,45 @@ export function useLiveVolume(pair: MarketInstrument) {
 
     function publish() {
       const end = Date.now() - VOLUME_DELAY_MS;
+      const cutoff = end - MINUTE_MS;
       for (const [id, trade] of trades) {
-        if (trade.time < end - MINUTE_MS) trades.delete(id);
+        if (trade.time >= cutoff) continue;
+        trades.delete(id);
+        if (collectClosed && trade.time >= connectedAt && trade.side) {
+          const minute = Math.floor(trade.time / MINUTE_MS) * MINUTE_MS;
+          const amounts = closedMinutes.get(minute) ?? { buy: 0, sell: 0 };
+          amounts[trade.side] += trade.amount;
+          closedMinutes.set(minute, amounts);
+        }
       }
-      if (ready) setVolume({ asOf: end, windows: sumShortVolume(trades.values(), end, rates, alpha, coveredFrom) });
+      archivedBefore = cutoff;
+      if (collectClosed) {
+        const asOf = Math.floor(cutoff / MINUTE_MS) * MINUTE_MS;
+        if (asOf > closedAsOf) {
+          closedAsOf = asOf;
+          closedWindows = [];
+          const keepFrom = asOf - 10080 * MINUTE_MS;
+          for (const minute of closedMinutes.keys()) {
+            if (minute < keepFrom) closedMinutes.delete(minute);
+          }
+          for (const [period, minutes] of closedPeriods) {
+            const start = asOf - minutes * MINUTE_MS;
+            if (start < connectedAt) continue;
+            const amounts = { buy: 0, sell: 0 };
+            for (let minute = start; minute < asOf; minute += MINUTE_MS) {
+              const row = closedMinutes.get(minute);
+              if (row) {
+                amounts.buy += row.buy;
+                amounts.sell += row.sell;
+              }
+            }
+            closedWindows.push({ period, asOf, amounts, total: amounts.buy + amounts.sell });
+          }
+        }
+      }
+      if (ready) setVolume({
+        asOf: end, windows: sumShortVolume(trades.values(), end, rates, alpha, coveredFrom), closedWindows,
+      });
     }
 
     async function readView<T>(view: "recent" | "rates", signal: AbortSignal): Promise<T> {
@@ -69,8 +110,12 @@ export function useLiveVolume(pair: MarketInstrument) {
             if (trade.time < seedCutoff) trades.delete(id);
           }
         }
-        for (const trade of data.trades) trades.set(alpha ? -trade.id - 1 : trade.id, trade);
-        coveredFrom = data.coveredFrom ?? -Infinity;
+        for (const trade of data.trades) {
+          if (!collectClosed || trade.time >= archivedBefore) trades.set(alpha ? -trade.id - 1 : trade.id, trade);
+        }
+        const seedCoverage = data.coveredFrom ?? -Infinity;
+        if (!external) coveredFrom = seedCoverage;
+        else if (data.asOf >= connectedAt) coveredFrom = Math.min(coveredFrom, seedCoverage);
         if (data.rates && rates) {
           for (const [minute, rate] of data.rates) {
             if (!rates.has(minute)) rates.set(minute, rate);
@@ -87,22 +132,20 @@ export function useLiveVolume(pair: MarketInstrument) {
     function connect() {
       const stream = encodeURIComponent(symbol.toLowerCase());
       const url = exchange === "okx" ? "wss://ws.okx.com:8443/ws/v5/business"
-        : coinbasePerpetual ? "wss://www.deribit.com/ws/api/v2"
-        : exchange === "coinbase" ? "wss://ws-feed.exchange.coinbase.com"
         : kind === "alpha" ? alphaStream : `${streamEndpoints[kind]}/${stream}@aggTrade`;
       const connection = new WebSocket(url);
       socket = connection;
       connectTimeout = setTimeout(() => connection.close(), 10000);
       let subscribed = false;
       let lastMessage = Date.now();
-      let lastCoinbaseTradeId: number | undefined;
 
       function startSeed() {
         if (subscribed) return;
         subscribed = true;
         clearTimeout(connectTimeout);
         if (external) {
-          coveredFrom = Date.now();
+          connectedAt = Date.now();
+          coveredFrom = connectedAt;
           ready = true;
           setReconnecting(false);
         }
@@ -115,17 +158,10 @@ export function useLiveVolume(pair: MarketInstrument) {
         if (alpha) connection.send(JSON.stringify({ method: "SUBSCRIBE", params: [`${stream}@trade`], id: 1 }));
         else if (exchange === "okx") {
           connection.send(JSON.stringify({ op: "subscribe", args: [{ channel: "trades-all", instId: symbol }] }));
-        } else if (coinbasePerpetual) {
-          connection.send(JSON.stringify({
-            jsonrpc: "2.0", id: 1, method: "public/subscribe", params: { channels: [`trades.${symbol}.100ms`] },
-          }));
-        } else if (exchange === "coinbase") {
-          connection.send(JSON.stringify({ type: "subscribe", product_ids: [symbol], channels: ["matches", "heartbeat"] }));
         } else startSeed();
         if (external) heartbeat = setInterval(() => {
           if (Date.now() - lastMessage > 45000) return connection.close();
           if (exchange === "okx") connection.send("ping");
-          if (coinbasePerpetual) connection.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "public/test" }));
         }, 15000);
       };
       connection.onmessage = ({ data }) => {
@@ -139,28 +175,8 @@ export function useLiveVolume(pair: MarketInstrument) {
             if (frame.arg?.instId === symbol && Array.isArray(frame.data)) {
               for (const row of frame.data) {
                 const trade = okxTrade(row, contractSize);
-                trades.set(trade.id, trade);
+                if (!collectClosed || trade.time >= archivedBefore) trades.set(trade.id, trade);
               }
-            }
-          } else if (coinbasePerpetual) {
-            if (frame.id === 1 && frame.error) return connection.close();
-            if (frame.id === 1 && frame.result?.includes(`trades.${symbol}.100ms`)) startSeed();
-            if (frame.params?.channel === `trades.${symbol}.100ms` && Array.isArray(frame.params.data)) {
-              for (const row of frame.params.data) {
-                const trade = coinbasePerpetualTrade(row);
-                trades.set(trade.id, trade);
-              }
-            }
-          } else if (exchange === "coinbase") {
-            if (frame.type === "error") return connection.close();
-            if (frame.type === "subscriptions") startSeed();
-            if (frame.type === "match" && frame.product_id === symbol) {
-              const trade = coinbaseSpotTrade(frame);
-              if (lastCoinbaseTradeId !== undefined && trade.id > lastCoinbaseTradeId + 1) {
-                return connection.close();
-              }
-              lastCoinbaseTradeId = Math.max(lastCoinbaseTradeId ?? trade.id, trade.id);
-              trades.set(trade.id, trade);
             }
           } else if (alpha) {
             if (frame.id === 1 && frame.result === null) startSeed();
@@ -186,6 +202,10 @@ export function useLiveVolume(pair: MarketInstrument) {
         ready = false;
         seedCutoff = undefined;
         trades.clear();
+        closedMinutes.clear();
+        connectedAt = Infinity;
+        closedAsOf = -Infinity;
+        closedWindows = [];
         setVolume(null);
         setReconnecting(true);
         reconnect = setTimeout(connect, 5000);
@@ -223,5 +243,5 @@ export function useLiveVolume(pair: MarketInstrument) {
     };
   }, [exchange, kind, symbol, quote, contractSize]);
 
-  return { asOf: volume?.asOf, windows: volume?.windows ?? emptyWindows, reconnecting };
+  return { asOf: volume?.asOf, windows: volume?.windows ?? emptyWindows, closedWindows: volume?.closedWindows ?? [], reconnecting };
 }

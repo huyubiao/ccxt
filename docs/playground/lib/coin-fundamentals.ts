@@ -1,18 +1,22 @@
 import { binanceSpot } from "./binance-markets";
-import { positiveNumber, type CoinOverview, type CoinUnlock, type CoinValuation } from "./coin-overview";
+import { positiveNumber, type CoinOverview, type CoinValuation } from "./coin-overview";
 import type { MarketInstrument } from "./market-lookup";
-import { getNextUnlock } from "./coin-unlocks";
+import { getNextUnlock, getStoredIdentity, getTokenomics, unlockSnapshotAt } from "./coin-unlocks";
+import sourceAliases from "./coin-source-aliases.json";
 
 type MarketIdentity = { symbol: string; target: string; coin_id: string; contract_type: string };
 type CoinGeckoMarket = {
   id: string; symbol: string; current_price: number | null;
   market_cap: number | null; total_supply: number | null; last_updated: string | null;
+  max_supply?: number | null;
+  unlimited?: boolean;
   source?: "CoinMarketCap";
 };
 type CmcMarket = {
   data?: {
-    slug: string; symbol: string; lastUpdated?: string;
-    statistics?: { price?: number; marketCap?: number; totalSupply?: number; lastUpdated?: string };
+    id: number; slug: string; symbol: string; lastUpdated?: string; isInfiniteMaxSupply?: number;
+    platforms?: { contractId: number; contractChainId: number; contractAddress: string; contractPlatform: string }[];
+    statistics?: { price?: number; marketCap?: number; circulatingSupply?: number; totalSupply?: number; maxSupply?: number; lastUpdated?: string };
   };
 };
 
@@ -44,15 +48,27 @@ function getIdentities() {
   return pending;
 }
 
-async function getCmcMarket(id: string, symbol: string): Promise<CoinGeckoMarket | null> {
+export async function getResearchIdentity(instrument: MarketInstrument) {
+  return getStoredIdentity(instrument.id) ?? (await getIdentities()).get(instrument.id);
+}
+
+export async function getCmcDetail(id: string, symbol: string) {
+  const slug = (sourceAliases as Record<string, string>)[id] ?? id;
   const { data } = await binanceSpot.fetch(
-    `https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail?slug=${encodeURIComponent(id)}`,
+    `https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail?slug=${encodeURIComponent(slug)}`,
   ) as CmcMarket;
-  if (data?.slug !== id || data.symbol?.toUpperCase() !== symbol || !data.statistics) return null;
+  if (data?.slug !== slug || data.symbol?.toUpperCase() !== symbol || !data.statistics) return null;
+  return data;
+}
+
+async function getCmcMarket(id: string, symbol: string): Promise<CoinGeckoMarket | null> {
+  const data = await getCmcDetail(id, symbol);
+  if (!data?.statistics) return null;
   const stats = data.statistics;
   return {
     id, symbol: data.symbol, current_price: stats.price ?? null, market_cap: stats.marketCap ?? null,
     total_supply: stats.totalSupply ?? null, last_updated: stats.lastUpdated ?? data.lastUpdated ?? null,
+    max_supply: stats.maxSupply ?? null, unlimited: data.isInfiniteMaxSupply === 1,
     source: "CoinMarketCap",
   };
 }
@@ -77,27 +93,29 @@ function getMarket(id: string, symbol: string) {
 }
 
 export async function getCoinOverview(instrument: MarketInstrument): Promise<CoinOverview> {
-  const empty = { market: null, unlock: null };
-  if (instrument.type === "TRADIFI_PERPETUAL") return { ...empty, status: "not-applicable" };
-  const id = (await getIdentities()).get(instrument.id);
-  if (!id) return { ...empty, status: "unmapped" };
+  if (instrument.type === "TRADIFI_PERPETUAL") return { market: null, unlock: null, tokenomics: null, status: "not-applicable" };
+  const tokenomics = getTokenomics(instrument.id);
+  const unlockData = { unlock: getNextUnlock(instrument.id), tokenomics, unlockSnapshotAt };
+  const storedId = getStoredIdentity(instrument.id);
+  const directory = storedId ? null : await getIdentities().catch(() => null);
+  const id = storedId ?? directory?.get(instrument.id);
+  if (!id && !directory) return { ...unlockData, market: null, status: "ready", marketError: true };
+  if (!id) return { ...unlockData, market: null, status: "unmapped" };
 
-  const marketRequest = getMarket(id, instrument.coin);
-  const unlockRequest = marketRequest.catch(() => null)
-    .then((row) => getNextUnlock(id, row?.symbol ?? instrument.coin));
-  const [marketResult, unlockResult] = await Promise.allSettled([marketRequest, unlockRequest]);
-  const row = marketResult.status === "fulfilled" ? marketResult.value : null;
+  const row = await getMarket(id, instrument.coin).catch(() => undefined);
   const price = positiveNumber(row?.current_price);
-  const supply = positiveNumber(row?.total_supply);
+  const maxSupply = tokenomics.maxSupply ?? positiveNumber(row?.max_supply);
+  const supplyLimit = tokenomics.supplyLimit !== "unknown" ? tokenomics.supplyLimit
+    : row?.unlimited ? "unlimited" : maxSupply !== null ? "capped" : "unknown";
   const market: CoinValuation | null = row ? {
     price,
     circulatingMarketCap: positiveNumber(row.market_cap),
-    totalMarketCap: price !== null && supply !== null ? price * supply : null,
+    totalMarketCap: price !== null && maxSupply !== null && supplyLimit === "capped" ? price * maxSupply : null,
+    supplyLimit, maxSupply,
     updatedAt: row.last_updated ? positiveNumber(Date.parse(row.last_updated)) : null,
-    sourceUrl: row.source === "CoinMarketCap" ? `https://coinmarketcap.com/currencies/${encodeURIComponent(id)}/`
+    sourceUrl: row.source === "CoinMarketCap" ? `https://coinmarketcap.com/currencies/${encodeURIComponent((sourceAliases as Record<string, string>)[id] ?? id)}/`
       : `https://www.coingecko.com/en/coins/${encodeURIComponent(id)}`,
     sourceName: row.source ?? "CoinGecko",
   } : null;
-  const unlock: CoinUnlock | null = unlockResult.status === "fulfilled" ? unlockResult.value : null;
-  return { market, unlock, status: "ready", marketError: marketResult.status === "rejected", unlockError: unlockResult.status === "rejected" };
+  return { ...unlockData, market, status: "ready", marketError: row === undefined };
 }

@@ -1,6 +1,6 @@
 import ccxt from "ccxt";
 import { binanceSpot, getAggregateTrades, getKlines } from "./binance-markets";
-import { getCoinbaseCandles, getExternalRecentTrades, getExternalTurnoverCandles } from "./external-markets";
+import { getExternalRecentTrades, getExternalTurnoverCandles, getOkxContractTurnover } from "./external-markets";
 import type { MarketInstrument, MarketVolume, VolumeWindow } from "./market-lookup";
 import {
   MINUTE_MS as MINUTE, VOLUME_DELAY_MS, parseAggregateTrade, shortPeriods, sumShortVolume,
@@ -39,7 +39,7 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
 
   // Full hours cover the middle of longer windows. Minutes cover their
   // unaligned edges and the 5-minute and 1-hour windows.
-  const [recent, hours, dayEdge, weekEdge, shortWindows] = await Promise.all([
+  const [recent, hours, dayEdge, weekEdge, shortWindows, contractTurnover] = await Promise.all([
     fetchBlock(contract, end - HOUR, end, MINUTE),
     olderBlock(firstWeekHour, lastHour, HOUR),
     olderBlock(end - DAY, firstDayHour, MINUTE),
@@ -49,8 +49,17 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
         sumShortVolume(trades, shortAsOf, rates === null ? null : new Map(rates), shortTotalOnly, coveredFrom))
       .catch(() => shortPeriods.map(({ period }) => shortTotalOnly
         ? { period, amounts: null, total: null } : { period, amounts: null })),
+    contract.exchange === "okx" && contract.kind === "futures"
+      ? getOkxContractTurnover(contract.id, end)
+      : [],
   ]);
   const tail = { ...recent, start: lastHour };
+  const history: VolumeWindow[] = [
+    { period: "5m", ...sumWindow([recent], end - 5 * MINUTE, contract.onboardAt, totalOnly) },
+    { period: "1h", ...sumWindow([recent], end - HOUR, contract.onboardAt, totalOnly) },
+    { period: "24h", ...sumWindow([dayEdge, hours, tail], end - DAY, contract.onboardAt, totalOnly) },
+    { period: "7d", ...sumWindow([weekEdge, hours, tail], end - WEEK, contract.onboardAt, totalOnly) },
+  ];
 
   return {
     symbol: contract.id,
@@ -59,10 +68,10 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
     convertedFrom: contract.quote === "USDT" ? null : contract.quote,
     windows: [
       ...shortWindows,
-      { period: "5m", ...sumWindow([recent], end - 5 * MINUTE, contract.onboardAt, totalOnly) },
-      { period: "1h", ...sumWindow([recent], end - HOUR, contract.onboardAt, totalOnly) },
-      { period: "24h", ...sumWindow([dayEdge, hours, tail], end - DAY, contract.onboardAt, totalOnly) },
-      { period: "7d", ...sumWindow([weekEdge, hours, tail], end - WEEK, contract.onboardAt, totalOnly) },
+      ...(external && historyOnly
+        ? [{ period: "1m" as const, ...sumWindow([recent], end - MINUTE, contract.onboardAt, true) }]
+        : []),
+      ...history.map((window) => contractTurnover.find(({ period }) => period === window.period) ?? window),
     ],
   };
 }
@@ -78,6 +87,25 @@ export async function getRecentVolumeSeed(
     getRecentVolumeRates(contract.quote, end),
   ]);
   return { asOf: end, ...data, rates };
+}
+
+export async function getAlertTurnover(contract: MarketInstrument, start: number, end: number) {
+  start = Math.max(start, contract.onboardAt);
+  if (start >= end) return 0;
+  const firstMinute = Math.ceil(start / MINUTE) * MINUTE;
+  const lastMinute = Math.floor(end / MINUTE) * MINUTE;
+  if (firstMinute > lastMinute) {
+    const trades = await fetchAggregateTrades(contract, start, end);
+    return trades.reduce((total, trade) => total + trade.amount, 0);
+  }
+  const [middle, head, tail] = await Promise.all([
+    fetchBlock(contract, firstMinute, lastMinute, MINUTE),
+    start < firstMinute ? fetchAggregateTrades(contract, start, firstMinute) : [],
+    lastMinute < end ? fetchAggregateTrades(contract, lastMinute, end) : [],
+  ]);
+  const { total } = sumWindow([middle], firstMinute, contract.onboardAt, true);
+  if (total == null) return null;
+  return total + [...head, ...tail].reduce((amount, trade) => amount + trade.amount, 0);
 }
 
 export async function getRecentVolumeRates(asset: string, end = Date.now()): Promise<[number, number][] | null> {
@@ -153,22 +181,6 @@ async function fetchBlock(
 
 async function fetchConversionRates(asset: string, params: { interval: string; startTime: number; endTime: number; limit: number; maxRetriesOnFailure: number }): Promise<Map<number, number>> {
   const rates = new Map<number, number>();
-  if (asset === "USD") {
-    const step = params.interval === "1h" ? HOUR : MINUTE;
-    const rows = await getCoinbaseCandles("USDT-USD", { ...params, startTime: params.startTime - 5 * step });
-    const prices = new Map(rows.map(([time, , , , close]) => [time * 1000, close]));
-    let lastPrice = 0;
-    let lastTime = -Infinity;
-    for (let time = params.startTime - 5 * step; time <= params.endTime; time += step) {
-      const close = prices.get(time);
-      if (close != null && close > 0) {
-        lastPrice = close;
-        lastTime = time;
-      }
-      if (time >= params.startTime && time - lastTime <= 5 * step) rates.set(time, 1 / lastPrice);
-    }
-    return rates;
-  }
   try {
     const rows = await binanceSpot.publicGetKlines({ ...params, symbol: `${asset}USDT` });
     for (const [openedAt, , , , close] of rows) {

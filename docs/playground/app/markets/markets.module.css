@@ -5,12 +5,49 @@
 
 .header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 8px 16px;
   padding: 14px clamp(18px, 5vw, 64px);
   border-bottom: 1px solid hsl(var(--border));
 }
 
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+.sectionNav { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-left: auto; font-size: 13px; }
+.sectionNav a { color: hsl(var(--brand)); }
+.sectionNav a:hover { text-decoration: underline; }
+.sectionTitle { margin: 0; font-size: 20px; }
+.monitorPanel, .workspace { scroll-margin-top: 16px; }
+.monitorPanel > h2 { margin-bottom: 12px; }
+.monitorFeature { border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); overflow: hidden; }
+.monitorSummary { padding: 14px 16px; cursor: pointer; }
+.monitorSummary h3 { display: inline; margin: 0; font-size: 16px; }
+.monitorSummary small { margin-left: 10px; color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 400; }
+.monitorSummary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
+.monitorFeature[open] > .monitorSummary { border-bottom: 1px solid hsl(var(--border)); }
+.monitorBody { padding: 16px; }
+.monitorHeading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
+.monitorSwitch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.monitorSwitch input { accent-color: hsl(var(--brand)); cursor: pointer; }
+.alertScroll { max-height: 360px; overflow-y: auto; }
+.alertTable thead { position: sticky; top: 0; background: hsl(var(--card)); }
+.alertTable small { display: block; color: hsl(var(--muted-foreground)); }
+.monitorSettings { padding: 16px; }
+.monitorSettings p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
+.monitorForm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.monitorForm input, .monitorForm button {
+  padding: 7px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font: inherit;
+}
+.monitorForm input { width: 110px; }
+.monitorForm input[type="checkbox"] { width: auto; accent-color: hsl(var(--brand)); cursor: pointer; }
+.monitorForm input:disabled { opacity: .5; }
+.monitorForm button { cursor: pointer; }
+.monitorForm button:hover { border-color: hsl(var(--brand)); }
 .content { max-width: 1540px; margin: auto; padding: clamp(28px, 4vw, 56px) 20px; }
 .intro { margin-bottom: 26px; }
 .eyebrow { margin: 0; font: 600 12px var(--mono); letter-spacing: .12em; color: hsl(var(--brand)); }
@@ -22,7 +59,12 @@
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid hsl(var(--border));
 }
+.researchHeading { grid-column: 1 / -1; }
+.researchHeading p { margin: 6px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
 
 .directory, .result {
   border: 1px solid hsl(var(--border));
@@ -32,7 +74,7 @@
 
 .directory { overflow: hidden; }
 .directoryHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px; }
-.directoryHeader h2 { margin: 0; font-size: 15px; }
+.directoryHeader h3 { margin: 0; font-size: 15px; }
 .directoryHeader span, .sync, .noMatches { color: hsl(var(--muted-foreground)); font-size: 12px; }
 .filter {
   width: calc(100% - 28px);
@@ -83,6 +125,19 @@
 .fundamentals { margin-bottom: 14px; }
 .fundamentalsGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.65fr); gap: 16px; }
 .fundamentalsGrid > div { min-width: 0; }
+.holderBlock { grid-column: 1 / -1; min-width: 0; padding-top: 14px; border-top: 1px solid hsl(var(--border)); }
+.holderButton {
+  margin: 8px 0;
+  padding: 7px 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+}
+.holderButton:disabled { cursor: wait; opacity: .6; }
+.holderScroll { max-height: 380px; overflow-y: auto; }
+.holderScroll thead { position: sticky; top: 0; background: hsl(var(--card)); }
 .fundamentalsGrid h4 { margin: 0 0 8px; font-size: 14px; }
 .fundamentalsNote { margin: 8px 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.5; }
 .fundamentalsLink { color: hsl(var(--brand)); font-size: 12px; }

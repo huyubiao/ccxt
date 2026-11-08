@@ -44,10 +44,59 @@ npm run dev                   # http://localhost:3000
 
 The local homepage lists coins with an active USDT-margined perpetual
 contract on Binance. Select a coin and switch platforms to view its
-USDT-quoted pairs across Binance, Coinbase, and OKX. The USDT filter also
+USDT-quoted pairs across Binance and OKX. The USDT filter also
 applies to Binance Alpha. Markets with multiple pairs offer a pair selector.
 Alpha pairs are grouped by coin symbol and include their Binance ID and,
 when available, their chain and token address to distinguish same-name tokens.
+
+Token details read supply limits, locked balances, and future releases from
+`lib/coin-unlock-snapshot.json`. The snapshot matches CoinMarketCap token
+details to perpetual contracts using CoinGecko's contract identities.
+The API's `tokenomics` field includes up to three future releases, their
+allocation breakdowns and supply percentages, and explicit coverage states.
+Percentages use maximum supply where available, otherwise the snapshot's
+total supply. Events derived from cumulative vesting curves carry
+`timeKind: "interval-estimate"` and `periodStart`, so consumers can distinguish
+release intervals from dated scheduled events. The research page shows
+the import time and hides expired events. It makes no outbound schedule requests.
+
+Bitcoin uses the protocol parameters in `lib/coin-issuance-rules.json` and a
+saved Blockstream height to calculate block subsidy, estimated daily issuance,
+and the next halving height and estimated date. These are issuance estimates,
+not a fixed daily vesting schedule. Total market cap is estimated as current
+price multiplied by maximum supply. Explicitly unlimited supply is labeled
+unlimited; unknown supply limits remain unknown.
+ETH's separately configured staking rules describe validator issuance and
+base-fee burning, with no fixed halving schedule. Its variable daily issuance,
+burn, and net issuance stay null until a verified daily snapshot is supplied.
+
+To refresh the snapshot manually, run `node scripts/refresh-unlock-snapshot.mjs`
+from `docs/playground` with curl available. If your network needs a proxy, set
+`HTTPS_PROXY` in the shell first. Refresh after a displayed event passes to
+import later events and update locked balances and the Bitcoin height.
+The importer replaces the file after downloading and matching token details,
+preserving previously saved records for individual sources that fail.
+Restart the server if it does not pick up the new file.
+Use `--missing-only` to fill missing token records or
+`--contracts=BTCUSDT,SUIUSDT` to refresh selected contracts while preserving
+the rest of the snapshot. Cross-source slug aliases live in
+`lib/coin-source-aliases.json` and still require matching token symbols.
+
+The token-details panel can fetch the largest 200 on-chain holder addresses
+on demand. Blockscout supplies balances and CoinMarketCap supplies the
+circulating-supply denominator. Both each address's share and the combined
+share are calculated from token quantities. Results identify the chain and
+contract, since a single-chain address list is not a global holder census.
+Exchange, custody, vesting, burn, and contract addresses remain included.
+Unsupported chains and incomplete rankings are labeled explicitly.
+Successful snapshots are cached for six hours in memory and in the ignored
+`.cache/holders/` directory. Native ETH uses Ethereum's address list.
+XRP uses XRPSCAN's nightly list with balances including escrow. TRX uses
+TRONSCAN's top accounts with total balances including staked/unstaking amounts.
+BTC uses CoinLore's free top-100 page, explicitly labeled as partial and
+approximate because the displayed balances are rounded. The BTC snapshot
+uses the same six-hour cache. Other native chains without a verified source
+show a coverage message.
 
 The app refreshes the lists every 15 seconds and also reacts to Binance
 futures `!contractInfo` notifications. Futures and spot show taker buy
@@ -55,9 +104,35 @@ and sell turnover. Alpha shows total turnover because its public trade
 direction field is deprecated. The 5-second, 30-second, and 1-minute
 windows refresh every second from live trades. The 5-minute, 1-hour,
 24-hour, and 7-day windows refresh after each closed minute.
-Coinbase and OKX show buy and sell turnover for short windows and totals
-for longer windows. Coinbase spot estimates long-window turnover from each
-candle's closing price and base volume.
+OKX shows taker buy and sell turnover from live trades for short windows.
+Until live trades cover a full minute, the one-minute row shows the last
+closed candle's quote turnover. Longer perpetual windows use OKX's completed
+contract taker-volume periods and show each window's cutoff. Longer spot
+windows fill in as the live stream covers each full window. Confirmed candle
+totals are available while directional data is missing.
+
+Use the price monitor embedded in the market page to watch all listed Binance
+USDT perpetual contracts. Its settings and alert history are grouped in the
+collapsible spike-monitor panel, expanded by default. Collapsing the panel
+keeps enabled monitoring running. Monitoring starts off by default. Enable it with
+the switch in the panel. Turning it off closes the price stream and stops
+monitor requests while keeping the alerts already shown on the page.
+Set the window in seconds (1 to 3600, default 60)
+and enable upward alerts, downward alerts, or both, with separate thresholds.
+Each direction maintains its own rolling samples and post-alert baseline.
+Changing and saving alert settings restarts sampling. Existing signed
+threshold settings migrate to the corresponding direction.
+The monitor samples the latest received price once per second. A rule
+triggers when its signed percentage threshold is reached or exceeded.
+After an alert, its trigger price becomes the reference for the same duration.
+At the end of that duration, the monitor resumes the rolling window of
+post-alert prices. A new alert starts a new reference period.
+Alerts appear in the open page and optionally as browser notifications.
+The browser saves the switch, window, and threshold locally. The monitor
+starts a new price window after reconnecting, re-enabling, or changing the duration.
+Alerts include the configured window's USDT turnover and the latest available
+five-minute account and top-trader position ratios at the trigger time, shown
+separately for Binance and the matching OKX USDT perpetual contract.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets

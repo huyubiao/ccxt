@@ -1,0 +1,11 @@
+{
+  "BTCUSDT": {
+    "symbol": "BTC",
+    "initialBlockReward": 50,
+    "halvingInterval": 210000,
+    "targetBlockSeconds": 600,
+    "maxSupply": 21000000,
+    "sourceName": "Bitcoin Core",
+    "sourceUrl": "https://github.com/bitcoin/bitcoin/blob/master/src/kernel/chainparams.cpp"
+  }
+}

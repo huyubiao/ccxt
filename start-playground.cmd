@@ -30,6 +30,8 @@ if not errorlevel 1 (
     exit /b 0
 )
 
+call :configure_proxy
+
 if not exist "node_modules\next\dist\bin\next" (
     echo Installing Playground dependencies...
     call :install_dependencies
@@ -41,6 +43,16 @@ echo Press Ctrl+C in this window to stop the server.
 "%PLAYGROUND_NODE%" "node_modules\next\dist\bin\next" dev --hostname 127.0.0.1 --port %PLAYGROUND_PORT%
 if errorlevel 1 goto :failed
 popd
+exit /b 0
+
+:configure_proxy
+rem Preserve explicit proxy settings. Windows environment variable names are case-insensitive.
+if defined HTTPS_PROXY exit /b 0
+if defined HTTP_PROXY exit /b 0
+for /f "delims=" %%P in ('powershell.exe -NoProfile -Command "$settings = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue; if ($settings.ProxyEnable -eq 1) { $server = $settings.ProxyServer; if ($server -match '(?:^|;)https=([^;]+)') { $server = $Matches[1] }; if ($server -match '^(?:http://)?((?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\]):[0-9]{1,5})$') { 'http://' + $Matches[1] } }"') do set "HTTPS_PROXY=%%P"
+if not defined HTTPS_PROXY exit /b 0
+if not defined NO_PROXY set "NO_PROXY=localhost,127.0.0.1,::1"
+echo Using the Windows system proxy for outbound HTTPS requests.
 exit /b 0
 
 :install_dependencies
