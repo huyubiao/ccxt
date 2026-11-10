@@ -168,8 +168,8 @@ export default function CoinFundamentals({ symbol }: { symbol: string }) {
   const market = data?.market;
   const snapshotAt = data?.tokenomics?.updatedAt ?? data?.unlockSnapshotAt;
   return (
-    <section className={`${styles.result} ${styles.fundamentals}`} aria-label="代币详情">
-      <h3 className={styles.marketTitle}>代币详情</h3>
+    <details className={`${styles.result} ${styles.fundamentals}`} open>
+      <summary className={styles.researchSummary}><h3 className={styles.marketTitle}>代币详情</h3></summary>
       {data?.status === "not-applicable" ? <p className={styles.fundamentalsNote}>该资产没有适用的代币市值和解锁数据。</p> : (
         <div className={styles.fundamentalsGrid}>
           <div>
@@ -203,6 +203,6 @@ export default function CoinFundamentals({ symbol }: { symbol: string }) {
           <CoinHolders key={symbol} symbol={symbol} />
         </div>
       )}
-    </section>
+    </details>
   );
 }

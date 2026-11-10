@@ -1,12 +1,11 @@
-import { circulatingPercentage, HOLDER_LIMIT, parseBitcoinRichList, rawInteger, tokenAmount,
-  type HolderConcentration } from "./holder-concentration";
+import { HOLDER_LIMIT, parseBitcoinRichList, rawInteger, tokenAmount, type HolderSnapshot } from "./holder-concentration";
 
 type Request = <T>(url: string) => Promise<T>;
 type NativeRow = { address: string; raw: bigint; label: string | null };
 
 export async function getNativeHolderConcentration(
-  id: string, symbol: string, supply: number | null, request: Request,
-): Promise<HolderConcentration | null> {
+  id: string, symbol: string, request: Request,
+): Promise<HolderSnapshot | null> {
   let rows: NativeRow[];
   let chain: string;
   let decimals: number;
@@ -65,13 +64,9 @@ export async function getNativeHolderConcentration(
   return {
     status: rows.length === HOLDER_LIMIT ? "available" : "partial",
     message: rows.length < HOLDER_LIMIT ? `免费来源当前仅有前 ${rows.length} 名，尚未取得完整前 200 名。` : null,
-    symbol, chain, tokenAddress: null, circulatingSupply: supply, totalAmount,
-    circulatingPercentage: circulatingPercentage(totalAmount, supply),
-    rows: rows.map((row) => {
-      const amount = tokenAmount(row.raw, decimals);
-      return { address: row.address, amount, label: row.label, explorerUrl: addressUrl(row.address),
-        circulatingPercentage: circulatingPercentage(amount, supply) };
-    }),
+    symbol, chain, tokenAddress: null, totalAmount,
+    rows: rows.map((row) => ({ address: row.address, amount: tokenAmount(row.raw, decimals),
+      label: row.label, explorerUrl: addressUrl(row.address) })),
     fetchedAt: Date.now(), stale: false, sourceName, sourceUrl, balanceScope, amountsEstimated,
   };
 }

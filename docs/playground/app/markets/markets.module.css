@@ -123,6 +123,8 @@
 
 .coinTitle { margin: 0 0 12px; font-size: 22px; overflow-wrap: anywhere; }
 .fundamentals { margin-bottom: 14px; }
+.researchSummary { cursor: pointer; }
+.researchSummary h3, .researchSummary h4 { display: inline; }
 .fundamentalsGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.65fr); gap: 16px; }
 .fundamentalsGrid > div { min-width: 0; }
 .holderBlock { grid-column: 1 / -1; min-width: 0; padding-top: 14px; border-top: 1px solid hsl(var(--border)); }
@@ -198,6 +200,22 @@
 .turnover h4 span { margin-left: 5px; color: hsl(var(--muted-foreground)); font: 12px var(--mono); }
 .turnover p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .tableScroll { overflow-x: auto; }
+.liquidationGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 16px; }
+.liquidationGrid > div { min-width: 0; }
+.liquidationGrid h5 { margin: 12px 0 4px; font-size: 13px; }
+.liquidationOrder { margin-top: 12px; }
+.liquidationChart { margin: 12px 0 0; }
+.liquidationChart figcaption { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; }
+.liquidationChart svg { display: block; width: 100%; min-width: 560px; }
+.liquidationChart text { fill: hsl(var(--muted-foreground)); font: 12px var(--mono); }
+.liquidationGridline { stroke: hsl(var(--border)); }
+.liquidationMark { stroke: hsl(var(--foreground)); stroke-dasharray: 4 4; }
+.liquidationMethod { margin-top: 10px; font-size: 12px; line-height: 1.6; }
+.liquidationMethod summary { cursor: pointer; font-weight: 600; }
+.liquidationMethod ol, .liquidationMethod ul { padding-left: 20px; }
+.liquidationMethod li + li { margin-top: 4px; }
+.liquidationScroll { max-height: 320px; overflow-y: auto; }
+.liquidationScroll th[scope="col"] { position: sticky; top: 0; background: hsl(var(--background)); }
 .turnover table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .turnover th, .turnover td { padding: 7px 4px; white-space: nowrap; border-bottom: 1px solid hsl(var(--border)); }
 .turnover th { font-weight: 500; text-align: left; }

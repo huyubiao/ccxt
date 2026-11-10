@@ -1,29 +1,33 @@
 export const HOLDER_LIMIT = 200;
 
-export type HolderRow = {
+type HolderBalance = {
   address: string;
   amount: string;
-  circulatingPercentage: number | null;
   label: string | null;
   explorerUrl: string;
 };
 
-export type HolderConcentration = {
+export type HolderSnapshot = {
   status: "available" | "partial" | "unsupported" | "unavailable";
   message: string | null;
   symbol: string;
   chain: string | null;
   tokenAddress: string | null;
-  circulatingSupply: number | null;
   totalAmount: string | null;
-  circulatingPercentage: number | null;
-  rows: HolderRow[];
+  rows: HolderBalance[];
   fetchedAt: number;
   stale: boolean;
   sourceName: string;
   sourceUrl: string | null;
   balanceScope?: string;
   amountsEstimated?: boolean;
+};
+
+export type HolderConcentration = Omit<HolderSnapshot, "rows"> & {
+  maxSupply: number | null;
+  totalMarketCap: number | null;
+  totalMarketCapPercentage: number | null;
+  rows: (HolderBalance & { totalMarketCapPercentage: number | null })[];
 };
 
 export function tokenAmount(raw: bigint, decimals: number): string {
@@ -36,10 +40,21 @@ export function tokenAmount(raw: bigint, decimals: number): string {
   return digits.slice(0, -decimals) + (fraction ? "." + fraction : "");
 }
 
-export function circulatingPercentage(amount: string, supply: number | null) {
-  if (supply === null || !Number.isFinite(supply) || supply <= 0) return null;
-  const percentage = Number(amount) / supply * 100;
+export function holderMarketCapPercentage(amount: string, maxSupply: number | null) {
+  if (maxSupply === null || !Number.isFinite(maxSupply) || maxSupply <= 0) return null;
+  const percentage = Number(amount) / maxSupply * 100;
   return Number.isFinite(percentage) ? percentage : null;
+}
+
+export function withHolderMarketCap(snapshot: HolderSnapshot, maxSupply: number | null, totalMarketCap: number | null): HolderConcentration {
+  const { status, message, symbol, chain, tokenAddress, totalAmount, fetchedAt, stale,
+    sourceName, sourceUrl, balanceScope, amountsEstimated } = snapshot;
+  return { status, message, symbol, chain, tokenAddress, totalAmount, fetchedAt, stale, sourceName, sourceUrl,
+    balanceScope, amountsEstimated, maxSupply, totalMarketCap,
+    totalMarketCapPercentage: totalAmount === null ? null : holderMarketCapPercentage(totalAmount, maxSupply),
+    rows: snapshot.rows.map(({ address, amount, label, explorerUrl }) => ({ address, amount, label, explorerUrl,
+      totalMarketCapPercentage: holderMarketCapPercentage(amount, maxSupply) })),
+  };
 }
 
 export function rawInteger(value: unknown): bigint {

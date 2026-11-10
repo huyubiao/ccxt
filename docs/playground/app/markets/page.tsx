@@ -12,6 +12,8 @@ import { MINUTE_MS, VOLUME_DELAY_MS } from "@/lib/short-volume";
 import { useMarketDirectory } from "./use-market-directory";
 import { useLiveVolume } from "./use-live-volume";
 import CoinFundamentals from "./coin-fundamentals";
+import CoinFunding from "./coin-funding";
+import CoinLiquidations from "./coin-liquidations";
 import styles from "./markets.module.css";
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
@@ -97,7 +99,7 @@ export default function MarketsPage() {
       <header className={styles.header}>
         <div className={styles.brand}><Logo size={22} /> CCXT</div>
         <nav className={styles.sectionNav} aria-label="页面板块">
-          <a href="#market-alerts">监控币种</a>
+          <a href="#market-alerts">交易策略</a>
           <a href="#coin-research">币种深度调研</a>
         </nav>
       </header>
@@ -110,7 +112,7 @@ export default function MarketsPage() {
         </div>
 
         <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
-          <h2 id="market-alert-heading" className={styles.sectionTitle}>监控币种</h2>
+          <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
           <MarketMonitor />
         </section>
         <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
@@ -156,7 +158,8 @@ export default function MarketsPage() {
             {coin ? (
               <>
                 <h3 className={styles.coinTitle}>{coin.symbol} 行情</h3>
-                {referenceContract && <CoinFundamentals key={referenceContract.id} symbol={referenceContract.id} />}
+                {referenceContract && <CoinFundamentals key={`fundamentals:${referenceContract.id}`} symbol={referenceContract.id} />}
+                {referenceContract && <CoinLiquidations key={`liquidations:${referenceContract.id}`} symbol={referenceContract.id} />}
                 <div className={styles.platforms} role="group" aria-label="交易平台">
                   {marketExchanges.map((venue) => (
                     <button key={venue} type="button" aria-pressed={venue === exchange} onClick={() => setExchange(venue)}>
@@ -261,6 +264,7 @@ function PairData({ pair }: { pair: MarketInstrument }) {
       {quote && <Quote pair={pair} quote={quote} />}
       {error ? <p className={styles.marketEmpty} role="status">{error}</p>
         : !quote && <p className={styles.marketEmpty} role="status">正在获取行情…</p>}
+      {kind === "futures" && <CoinFunding exchange={exchange} symbol={symbol} />}
       <TradeVolume pair={pair} />
     </>
   );

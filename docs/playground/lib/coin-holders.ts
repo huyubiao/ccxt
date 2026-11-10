@@ -2,15 +2,14 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { binanceSpot } from "./binance-markets";
-import { getCmcDetail, getResearchIdentity } from "./coin-fundamentals";
-import { positiveNumber } from "./coin-overview";
-import { circulatingPercentage, HOLDER_LIMIT, tokenAmount, type HolderConcentration } from "./holder-concentration";
+import { getCmcDetail, getCoinOverview, getResearchIdentity } from "./coin-fundamentals";
+import { HOLDER_LIMIT, tokenAmount, withHolderMarketCap, type HolderSnapshot } from "./holder-concentration";
 import type { MarketInstrument } from "./market-lookup";
 import { getNativeHolderConcentration } from "./native-holder-sources";
 
 const CACHE_MS = 6 * 60 * 60 * 1000;
-const cache = new Map<string, { expiresAt: number; data: HolderConcentration }>();
-const pending = new Map<string, Promise<HolderConcentration>>();
+const cache = new Map<string, { expiresAt: number; data: HolderSnapshot }>();
+const pending = new Map<string, Promise<HolderSnapshot>>();
 const explorers: Record<number, { name: string; url: string }> = {
   1: { name: "Ethereum", url: "https://eth.blockscout.com" },
   10: { name: "Optimism", url: "https://optimism.blockscout.com" },
@@ -30,23 +29,22 @@ type Page = {
   next_page_params: Record<string, string | number> | null;
 };
 
-function empty(pair: MarketInstrument, status: HolderConcentration["status"], message: string): HolderConcentration {
+function empty(pair: MarketInstrument, status: HolderSnapshot["status"], message: string): HolderSnapshot {
   return {
-    status, message, symbol: pair.coin, chain: null, tokenAddress: null, circulatingSupply: null,
-    totalAmount: null, circulatingPercentage: null, rows: [], fetchedAt: Date.now(), stale: false,
+    status, message, symbol: pair.coin, chain: null, tokenAddress: null,
+    totalAmount: null, rows: [], fetchedAt: Date.now(), stale: false,
     sourceName: "Blockscout", sourceUrl: null,
   };
 }
 
-async function fetchHolders(pair: MarketInstrument): Promise<HolderConcentration> {
+async function fetchHolders(pair: MarketInstrument): Promise<HolderSnapshot> {
   const id = await getResearchIdentity(pair);
   if (!id) return empty(pair, "unsupported", "尚未核实该币种的链上身份。");
   const detail = await getCmcDetail(id, pair.coin);
-  if (!detail) return empty(pair, "unsupported", "尚未核实该币种的链上身份与流通量。");
+  if (!detail) return empty(pair, "unsupported", "尚未核实该币种的链上身份。");
   const native = id === "ethereum";
   const request = <T>(url: string): Promise<T> => binanceSpot.fetch(url);
-  const supply = positiveNumber(detail.statistics?.circulatingSupply);
-  const nativeResult = await getNativeHolderConcentration(id, detail.symbol, supply, request);
+  const nativeResult = await getNativeHolderConcentration(id, detail.symbol, request);
   if (nativeResult) return nativeResult;
   if (nativeAssets.has(id) && !native) {
     return empty(pair, "unsupported", "该原生币尚未接入可分页查询前 200 地址的数据源。");
@@ -66,7 +64,7 @@ async function fetchHolders(pair: MarketInstrument): Promise<HolderConcentration
   const result = empty(pair, "available", "");
   Object.assign(result, {
     message: null, symbol: detail.symbol, chain: chain.name, tokenAddress: address,
-    circulatingSupply: supply, sourceUrl: native ? `${chain.url}/accounts` : `${chain.url}/token/${address}`,
+    sourceUrl: native ? `${chain.url}/accounts` : `${chain.url}/token/${address}`,
   });
   const seen = new Set<string>();
   const cursors = new Set<string>();
@@ -93,7 +91,7 @@ async function fetchHolders(pair: MarketInstrument): Promise<HolderConcentration
       const amount = tokenAmount(BigInt(raw), decimals);
       const account = native ? row : row.address;
       result.rows.push({
-        address: holder, amount, circulatingPercentage: circulatingPercentage(amount, supply),
+        address: holder, amount,
         label: account?.metadata?.tags?.find((tag) => tag.tagType === "name")?.name ?? account?.name ?? null,
         explorerUrl: `${chain.url}/address/${holder}`,
       });
@@ -109,7 +107,6 @@ async function fetchHolders(pair: MarketInstrument): Promise<HolderConcentration
   }
   result.rows.sort((a, b) => Number(b.amount) - Number(a.amount));
   result.totalAmount = tokenAmount(total, decimals);
-  result.circulatingPercentage = circulatingPercentage(result.totalAmount, supply);
   if (!result.rows.length) result.message = "来源当前未返回持币地址。";
   if (!exhausted && result.rows.length < HOLDER_LIMIT) {
     result.status = "partial";
@@ -119,19 +116,19 @@ async function fetchHolders(pair: MarketInstrument): Promise<HolderConcentration
   return result;
 }
 
-async function load(pair: MarketInstrument): Promise<HolderConcentration> {
+async function load(pair: MarketInstrument): Promise<HolderSnapshot> {
   const folder = path.join(process.cwd(), ".cache", "holders");
   const file = path.join(folder, `${pair.id}.json`);
-  let saved: HolderConcentration | undefined = cache.get(pair.id)?.data;
+  let saved: HolderSnapshot | undefined = cache.get(pair.id)?.data;
   if (!saved) {
-    try { saved = JSON.parse(await readFile(file, "utf8")) as HolderConcentration; } catch { /* Cache may not exist yet. */ }
+    try { saved = JSON.parse(await readFile(file, "utf8")) as HolderSnapshot; } catch { /* Cache may not exist yet. */ }
   }
   if (saved && (saved.status === "available" || saved.status === "partial" && saved.amountsEstimated) &&
       Date.now() - saved.fetchedAt < CACHE_MS) {
     cache.set(pair.id, { expiresAt: saved.fetchedAt + CACHE_MS, data: saved });
     return saved;
   }
-  let data: HolderConcentration;
+  let data: HolderSnapshot;
   try { data = await fetchHolders(pair); }
   catch {
     data = saved?.rows.length ? { ...saved, stale: true, message: "刷新失败，显示上次快照。" }
@@ -151,7 +148,7 @@ async function load(pair: MarketInstrument): Promise<HolderConcentration> {
   return data;
 }
 
-export function getHolderConcentration(pair: MarketInstrument): Promise<HolderConcentration> {
+function getHolderSnapshot(pair: MarketInstrument): Promise<HolderSnapshot> {
   const hit = cache.get(pair.id);
   if (hit && hit.expiresAt > Date.now()) return Promise.resolve(hit.data);
   const inFlight = pending.get(pair.id);
@@ -159,4 +156,11 @@ export function getHolderConcentration(pair: MarketInstrument): Promise<HolderCo
   const request = load(pair).finally(() => pending.delete(pair.id));
   pending.set(pair.id, request);
   return request;
+}
+
+export async function getHolderConcentration(pair: MarketInstrument) {
+  const [snapshot, overview] = await Promise.all([getHolderSnapshot(pair), getCoinOverview(pair).catch(() => null)]);
+  const supply = overview?.market ?? overview?.tokenomics;
+  return withHolderMarketCap(snapshot, supply?.supplyLimit === "capped" ? supply.maxSupply : null,
+    overview?.market?.totalMarketCap ?? null);
 }

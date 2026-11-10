@@ -18,3 +18,4 @@ runtime/
 .DS_Store
 *.log
 .cache/holders/
+.cache/liquidations/

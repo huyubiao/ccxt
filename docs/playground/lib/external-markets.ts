@@ -31,6 +31,20 @@ async function okx<T>(path: string, params: Params) {
   return response.data;
 }
 
+export async function getOkxFundingData(instId: string, limit: number) {
+  type Row = { instId: string; fundingRate?: string; realizedRate?: string; fundingTime?: string };
+  const [history, [quote]] = await Promise.all([
+    okx<Row>("public/funding-rate-history", { instId, limit }).catch(() => []),
+    okx<Row>("public/funding-rate", { instId }).catch(() => []),
+  ]);
+  return {
+    history: history.filter((row) => row.instId === instId)
+      .map((row) => ({ rate: row.realizedRate, time: row.fundingTime })),
+    // fundingTime is the first upcoming settlement; nextFundingTime is the one after it.
+    next: quote?.instId === instId ? { rate: quote.fundingRate, time: quote.fundingTime } : null,
+  };
+}
+
 type OkxPair = {
   instId: string; state: string; listTime: string; baseCcy: string; quoteCcy: string;
   uly: string; settleCcy: string; ctType: string; ctValCcy: string; ctVal: string;

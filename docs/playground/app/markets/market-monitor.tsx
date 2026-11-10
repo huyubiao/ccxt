@@ -13,6 +13,7 @@ const STREAM = "wss://fstream.binance.com/market/ws/!miniTicker@arr";
 const STORAGE_KEY = "ccxt-market-alert-threshold";
 const WINDOW_STORAGE_KEY = "ccxt-market-alert-seconds";
 const ENABLED_STORAGE_KEY = "ccxt-market-alert-enabled";
+const NOTIFICATION_STORAGE_KEY = "ccxt-market-alert-notifications";
 const DIRECTION_STORAGE_KEY = "ccxt-market-alert-directions";
 const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: null, down: -5 };
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
@@ -49,6 +50,9 @@ export default function MarketMonitor() {
   const [directoryError, setDirectoryError] = useState(false);
   const [online, setOnline] = useState(false);
   const [notification, setNotification] = useState<NotificationPermission | null>(null);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [requestingNotification, setRequestingNotification] = useState(false);
+  const notify = useRef(false);
   const activeRule = useRef({ ...DEFAULT_THRESHOLDS, seconds: DEFAULT_ALERT_SECONDS });
 
   useEffect(() => {
@@ -82,7 +86,14 @@ export default function MarketMonitor() {
     } catch {
       // Monitoring remains available without browser storage.
     }
-    if ("Notification" in window) setNotification(Notification.permission);
+    if ("Notification" in window) {
+      const permission = Notification.permission;
+      setNotification(permission);
+      let saved: string | null = null;
+      try { saved = localStorage.getItem(NOTIFICATION_STORAGE_KEY); } catch { /* Use browser permission. */ }
+      notify.current = permission === "granted" && saved !== "false";
+      setNotificationsEnabled(notify.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -179,7 +190,7 @@ export default function MarketMonitor() {
         setAlerts((previous) => previous.map((row) => dropped.has(row) ? { ...row, context: null } : row));
       }
       void loadContext();
-      if ("Notification" in window && Notification.permission === "granted") {
+      if (notify.current && "Notification" in window && Notification.permission === "granted") {
         const first = batch[0];
         try {
           new Notification(batch.length === 1 ? `${first.symbol} ${first.seconds} 秒价格告警` : `${batch.length} 个交易对触发价格告警`, {
@@ -243,6 +254,27 @@ export default function MarketMonitor() {
     };
   }, [enabled]);
 
+  async function toggleNotifications() {
+    if (!("Notification" in window)) return;
+    let next = false;
+    if (!notify.current) {
+      setRequestingNotification(true);
+      try {
+        const permission = Notification.permission === "default"
+          ? await Notification.requestPermission() : Notification.permission;
+        setNotification(permission);
+        next = permission === "granted";
+      } catch {
+        setNotification(Notification.permission);
+      } finally {
+        setRequestingNotification(false);
+      }
+    }
+    notify.current = next;
+    setNotificationsEnabled(next);
+    try { localStorage.setItem(NOTIFICATION_STORAGE_KEY, String(next)); } catch { /* Keep the session setting. */ }
+  }
+
   function toggleMonitoring(next: boolean) {
     setEnabled(next);
     if (!next) {
@@ -284,13 +316,13 @@ export default function MarketMonitor() {
   return (
     <details className={styles.monitorFeature} open>
       <summary className={styles.monitorSummary}>
-        <h3>插针监控 <small>{enabled ? "已启动 · 折叠后继续监控" : "已停止"}</small></h3>
+        <h3>插针狙击 <small>{enabled ? "已启动 · 折叠后继续监控" : "已停止"}</small></h3>
       </summary>
       <div className={styles.monitorBody}>
         <div className={styles.monitorHeading}>
           <label className={styles.monitorSwitch}>
             <input type="checkbox" role="switch" checked={enabled} onChange={(event) => toggleMonitoring(event.target.checked)} />
-            启用监控
+            启用策略
           </label>
         </div>
         <section className={`${styles.result} ${styles.monitorSettings}`} aria-label="告警设置">
@@ -308,10 +340,13 @@ export default function MarketMonitor() {
             </label>
             <input aria-label="下跌告警阈值" value={downInput} disabled={!downSelected} onChange={(event) => setDownInput(event.target.value)} aria-invalid={invalid === "down"} placeholder="5" />
             <button type="submit">保存设置</button>
-            {notification === "default" && <button type="button" onClick={async () => {
-              try { setNotification(await Notification.requestPermission()); } catch { setNotification(null); }
-            }}>开启桌面通知</button>}
+            {notification !== null && <button type="button" disabled={requestingNotification}
+              onClick={() => void toggleNotifications()}>
+              {notificationsEnabled ? "停止桌面通知" : "开启桌面通知"}
+            </button>}
           </form>
+          {notification === "denied" && <p role="status">浏览器已阻止桌面通知。请在站点权限中允许通知，再点击开启。</p>}
+          {notification === null && <p role="status">当前浏览器环境无法发送桌面通知。</p>}
           {invalid === "seconds" && <p role="alert">请输入 1 至 {MAX_ALERT_SECONDS} 之间的整数秒数。</p>}
           {invalid === "directions" && <p role="alert">请至少勾选上涨告警或下跌告警。</p>}
           {invalid === "up" && <p role="alert">上涨阈值请输入大于 0 的百分比。</p>}

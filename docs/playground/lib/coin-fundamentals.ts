@@ -52,6 +52,15 @@ export async function getResearchIdentity(instrument: MarketInstrument) {
   return getStoredIdentity(instrument.id) ?? (await getIdentities()).get(instrument.id);
 }
 
+export async function getDailyMarketCaps(instrument: MarketInstrument, days: number): Promise<[number, number][]> {
+  const id = await getResearchIdentity(instrument);
+  if (!id) return [];
+  const { market_caps } = await gecko<{ market_caps?: [number, number][] }>(
+    `coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}&interval=daily`,
+  );
+  return Array.isArray(market_caps) ? market_caps : [];
+}
+
 export async function getCmcDetail(id: string, symbol: string) {
   const slug = (sourceAliases as Record<string, string>)[id] ?? id;
   const { data } = await binanceSpot.fetch(
