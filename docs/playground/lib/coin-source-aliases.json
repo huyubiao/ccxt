@@ -3,5 +3,12 @@
   "ripple": "xrp",
   "optimistic-ethereum": "optimism-ethereum",
   "optimism": "optimism-ethereum",
-  "avalanche-2": "avalanche"
+  "avalanche-2": "avalanche",
+  "pancakeswap-token": "pancakeswap",
+  "lista": "lista-dao",
+  "kyber-network": "kyber-network-crystal-v2",
+  "kyber-network-crystal": "kyber-network-crystal-v2",
+  "compound-governance-token": "compound",
+  "near": "near-protocol",
+  "theta-token": "theta-network"
 }

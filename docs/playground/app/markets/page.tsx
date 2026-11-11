@@ -14,6 +14,7 @@ import { useLiveVolume } from "./use-live-volume";
 import CoinFundamentals from "./coin-fundamentals";
 import CoinFunding from "./coin-funding";
 import CoinLiquidations from "./coin-liquidations";
+import { CoinOrderBook } from "./coin-order-book";
 import styles from "./markets.module.css";
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
@@ -265,6 +266,7 @@ function PairData({ pair }: { pair: MarketInstrument }) {
       {error ? <p className={styles.marketEmpty} role="status">{error}</p>
         : !quote && <p className={styles.marketEmpty} role="status">正在获取行情…</p>}
       {kind === "futures" && <CoinFunding exchange={exchange} symbol={symbol} />}
+      {kind === "futures" && <CoinOrderBook exchange={exchange} symbol={symbol} />}
       <TradeVolume pair={pair} />
     </>
   );

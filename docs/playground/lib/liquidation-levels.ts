@@ -1,6 +1,8 @@
 export const LIQUIDATION_INTERVAL_MS = 5 * 60_000;
 export const LIQUIDATION_LOOKBACK_MS = 24 * 60 * 60_000;
-export const LIQUIDATION_REFRESH_MS = 30_000;
+export const LIQUIDATION_POSITION_HISTORY_MS = 3 * LIQUIDATION_LOOKBACK_MS;
+export const LIQUIDATION_REFRESH_MS = 60_000;
+export const LIQUIDATION_REPLACEMENT_SHARE = 0.10;
 export const MARKET_CAP_DAY_MS = 24 * 60 * 60_000;
 export const MARKET_CAP_WINDOWS = [360, 180, 60, 30] as const;
 const leverageScenarios = [1, 2, 3, 5, 10, 20];
@@ -25,9 +27,13 @@ const positionAddScenario = {
   maxNetIncreaseFraction: 0.20,
   maxPositionIncreaseFraction: 0.25,
 } as const;
+// A sensitivity assumption for high-leverage cross-margin positions whose
+// other losses have already eroded their buffer above maintenance margin.
+const reducedMarginBuffer = { shareOfUnaugmented: 0.20, remainingDistance: 0.25 } as const;
 const bandFraction = 0.005;
 
-export type MarginProfile = { maxLeverage: number; maintenanceRate: number; notionalCap: number };
+export type MarginBracket = { floor: number; cap: number; maxLeverage: number; rate: number; deduction: number };
+export type MarginProfile = { maxLeverage: number; maintenanceRate: number; notionalCap: number; brackets?: MarginBracket[] };
 
 type Side = typeof sides[number];
 type SizeGroup = "large" | "small";
@@ -170,7 +176,7 @@ export function getLeverageWeighting(
 }
 
 export type InterestPoint = { time: number; quantity: number };
-export type MarkBar = { time: number; high: number; low: number; close: number };
+export type MarkBar = { time: number; high: number; low: number; close: number; volume?: number };
 
 export type LiquidationBand = {
   side: Side;
@@ -183,9 +189,44 @@ export type LiquidationBand = {
   strength: number;
 };
 
+export const LIQUIDATION_SPIKE_PEAK_SHARE = 0.20;
+export const LIQUIDATION_SPIKE_NEIGHBOR_MULTIPLE = 2;
+
+export function selectLiquidationSpikes(bands: LiquidationBand[], markPrice: number, bandWidthPercent: number) {
+  const width = markPrice * bandWidthPercent / 100;
+  if (!Number.isFinite(width) || width <= 0) return [];
+  const spikes: LiquidationBand[] = [];
+  for (const side of sides) {
+    const byOffset = new Map<number, LiquidationBand>();
+    let peak = 0;
+    for (const band of bands) {
+      if (band.side !== side || band.estimatedLiquidationUsdt <= 0) continue;
+      const distance = side === "long" ? markPrice - band.upperPrice : band.lowerPrice - markPrice;
+      byOffset.set(Math.round(distance / width), band);
+      peak = Math.max(peak, band.estimatedLiquidationUsdt);
+    }
+
+    const lastOffset = side === "long" ? Math.ceil(100 / bandWidthPercent) - 1 : Infinity;
+    for (const [offset, band] of byOffset) {
+      if (band.estimatedLiquidationUsdt < peak * LIQUIDATION_SPIKE_PEAK_SHARE) continue;
+      let nearer = 0;
+      let farther = 0;
+      for (let step = 1; step <= 2; step++) {
+        nearer += byOffset.get(offset - step)?.estimatedLiquidationUsdt ?? 0;
+        farther += byOffset.get(offset + step)?.estimatedLiquidationUsdt ?? 0;
+      }
+      const nearerMean = nearer / Math.max(1, Math.min(2, offset));
+      const fartherMean = farther / Math.max(1, Math.min(2, lastOffset - offset));
+      // Test both directions so a flat run ending in empty bands does not look like a spike.
+      if (band.estimatedLiquidationUsdt >= Math.max(nearerMean, fartherMean) * LIQUIDATION_SPIKE_NEIGHBOR_MULTIPLE) spikes.push(band);
+    }
+  }
+  return spikes.sort((a, b) => b.estimatedLiquidationUsdt - a.estimatedLiquidationUsdt || a.lowerPrice - b.lowerPrice);
+}
+
 const tableDistanceEdges = {
-  long: [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95],
-  short: [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000],
+  long: [0, 5, 10, 20, 30, 40, 50, 60, 70, 80],
+  short: [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300],
 };
 
 export function groupLiquidationTable(bands: LiquidationBand[], markPrice: number, side: Side) {
@@ -210,13 +251,32 @@ export function groupLiquidationTable(bands: LiquidationBand[], markPrice: numbe
   }).reverse();
 }
 
-type Cohort = { side: Side; entry: number; leverage: number; maintenanceRate: number; price: number; quantity: number; openedAt: number; hasAdded?: boolean };
+type Cohort = { side: Side; entry: number; leverage: number; maintenanceRate: number; price: number; quantity: number; openedAt: number | null; hasAdded?: boolean };
+type Weights = ReturnType<typeof getLeverageWeighting>["weights"];
 
 function liquidationPrice(entry: number, direction: number, leverage: number, extraMargin: number, maintenanceRate: number) {
   return entry * (1 + direction * (1 + extraMargin) / leverage) / (1 + direction * maintenanceRate);
 }
 
-function allocatePositionAdds(cohorts: Cohort[], side: Side, close: number, netIncrease: number) {
+function bracketLiquidationPrice(entry: number, direction: number, leverage: number, extraMargin: number,
+  maintenanceRate: number, profile: MarginProfile | null) {
+  if (!profile?.brackets?.length) return liquidationPrice(entry, direction, leverage, extraMargin, maintenanceRate);
+  const { brackets } = profile;
+  // An OI cohort contains many positions. Use representative account notionals,
+  // never the aggregate cohort notional, to select an exchange bracket.
+  const eligible = brackets.findLast((bracket) => bracket.maxLeverage >= leverage);
+  const targetNotional = profile.notionalCap * (leverage > 20 ? 0.5 : 2);
+  const entryNotional = Math.min(targetNotional, (eligible?.cap ?? profile.notionalCap) * 0.95);
+  for (const { floor, cap, rate, deduction } of brackets) {
+    const trigger = entry * (1 + direction * ((1 + extraMargin) / leverage + deduction / entryNotional)) /
+      (1 + direction * rate);
+    const triggerNotional = entryNotional * trigger / entry;
+    if (trigger <= 0 || (triggerNotional >= floor && triggerNotional <= cap)) return trigger;
+  }
+  return liquidationPrice(entry, direction, leverage, extraMargin, maintenanceRate);
+}
+
+function allocatePositionAdds(cohorts: Cohort[], side: Side, close: number, netIncrease: number, marginProfile: MarginProfile | null) {
   const direction = side === "long" ? -1 : 1;
   const candidates = [];
   let eligibleQuantity = 0;
@@ -224,7 +284,7 @@ function allocatePositionAdds(cohorts: Cohort[], side: Side, close: number, netI
     if (cohort.side !== side || cohort.hasAdded || cohort.quantity <= 0) continue;
     const adverseMove = direction * (close - cohort.entry);
     if (adverseMove < Math.abs(cohort.price - cohort.entry) * positionAddScenario.adverseDistanceFraction) continue;
-    const addedTranchePrice = liquidationPrice(close, direction, cohort.leverage, 0, cohort.maintenanceRate);
+    const addedTranchePrice = bracketLiquidationPrice(close, direction, cohort.leverage, 0, cohort.maintenanceRate, marginProfile);
     if (direction * (addedTranchePrice - cohort.price) <= 0) continue;
     candidates.push({ cohort, addedTranchePrice });
     eligibleQuantity += cohort.quantity;
@@ -243,25 +303,63 @@ function allocatePositionAdds(cohorts: Cohort[], side: Side, close: number, netI
   return netIncrease - addedQuantity;
 }
 
-function applyInterestChange(cohorts: Cohort[], previous: InterestPoint, point: InterestPoint, bar: MarkBar,
-  weights: ReturnType<typeof getLeverageWeighting>["weights"]) {
-  const change = point.quantity - previous.quantity;
-  if (change < 0) {
-    const retainedFraction = point.quantity / previous.quantity;
-    for (const cohort of cohorts) cohort.quantity *= retainedFraction;
-  } else if (change > 0) {
-    for (const side of sides) {
-      const direction = side === "long" ? -1 : 1;
-      const newQuantity = allocatePositionAdds(cohorts, side, bar.close, change);
-      for (const weight of weights) {
-        for (const scenario of marginScenarios) {
-          const price = liquidationPrice(bar.close, direction, weight.leverage, scenario.extraInitialMarginFraction, weight.maintenanceRate);
-          cohorts.push({ side, entry: bar.close, leverage: weight.leverage, maintenanceRate: weight.maintenanceRate, price, openedAt: point.time,
-            quantity: newQuantity * weight[side] * scenario[side] });
-        }
+function openCohorts(cohorts: Cohort[], side: Side, entry: number, size: number, openedAt: number | null,
+  weights: Weights, marginProfile: MarginProfile | null) {
+  if (size <= 0) return;
+  const direction = side === "long" ? -1 : 1;
+  for (const weight of weights) {
+    for (const scenario of marginScenarios) {
+      const price = bracketLiquidationPrice(entry, direction, weight.leverage, scenario.extraInitialMarginFraction,
+        weight.maintenanceRate, marginProfile);
+      const quantity = size * weight[side] * scenario[side];
+      const cohort = { side, entry, leverage: weight.leverage, maintenanceRate: weight.maintenanceRate, price, openedAt, quantity };
+      if (marginProfile && weight.leverage > 20 && scenario.extraInitialMarginFraction === 0 &&
+          price > 0 && direction * (price - entry) > 0) {
+        const stressedQuantity = quantity * reducedMarginBuffer.shareOfUnaugmented;
+        cohorts.push({ ...cohort, price: entry + (price - entry) * reducedMarginBuffer.remainingDistance,
+          quantity: stressedQuantity });
+        cohort.quantity -= stressedQuantity;
       }
+      cohorts.push(cohort);
     }
   }
+}
+
+function initialCohorts(point: InterestPoint, priorBar: MarkBar | undefined, weights: Weights, marginProfile: MarginProfile | null) {
+  const cohorts: Cohort[] = [];
+  if (!priorBar || point.quantity <= 0) return cohorts;
+  for (const side of sides) {
+    openCohorts(cohorts, side, priorBar.low, point.quantity / 4, null, weights, marginProfile);
+    openCohorts(cohorts, side, priorBar.close, point.quantity / 2, null, weights, marginProfile);
+    openCohorts(cohorts, side, priorBar.high, point.quantity / 4, null, weights, marginProfile);
+  }
+  return cohorts.filter(({ side, price }) => side === "long" ? price < priorBar.close : price > priorBar.close);
+}
+
+function applyInterestChange(cohorts: Cohort[], previous: InterestPoint, point: InterestPoint, bar: MarkBar,
+  weights: Weights, marginProfile: MarginProfile | null) {
+  const change = point.quantity - previous.quantity;
+  const volume = bar.volume;
+  // Replacing the same quantity on both sides uses two trades per contract
+  // after accounting for trades needed to produce the net OI change.
+  const remainingVolume = volume !== undefined && Number.isFinite(volume) && volume >= Math.abs(change)
+    ? volume - Math.abs(change) : null;
+  const replacementMax = remainingVolume === null ? null
+    : Math.min(previous.quantity, point.quantity, remainingVolume / 2);
+  const replacedQuantity = (replacementMax ?? 0) * LIQUIDATION_REPLACEMENT_SHARE;
+  const closedQuantity = Math.max(0, -change) + replacedQuantity;
+  if (point.quantity === 0) cohorts.length = 0;
+  else if (closedQuantity > 0) {
+    const retainedFraction = 1 - closedQuantity / previous.quantity;
+    for (const cohort of cohorts) cohort.quantity *= retainedFraction;
+  }
+  if (change > 0 || replacedQuantity > 0) {
+    for (const side of sides) {
+      const netNew = change > 0 ? allocatePositionAdds(cohorts, side, bar.close, change, marginProfile) : 0;
+      openCohorts(cohorts, side, bar.close, netNew + replacedQuantity, point.time, weights, marginProfile);
+    }
+  }
+  return { replacementMax, replacedQuantity };
 }
 
 function survivesBar(cohort: Cohort, bar: MarkBar) {
@@ -279,21 +377,30 @@ export function replayLiquidations(symbol: string, interest: InterestPoint[], ba
   const points = new Map(interest.map((point) => [point.time, point]));
   const markBars = new Map(bars.map((bar) => [bar.time, bar]));
   const totals = { long: 0, short: 0 };
-  let cohorts: Cohort[] = [];
+  const intervals: { time: number; low: number; high: number; openInterestChange: number; long: number; short: number;
+    replacementMax: number | null; replacedQuantity: number }[] = [];
+  const initial = points.get(warmup);
+  let cohorts = initial ? initialCohorts(initial, markBars.get(warmup - step), weights, marginProfile) : [];
   for (let time = warmup; time < to; time += step) {
     const bar = markBars.get(time);
     const previous = points.get(time);
     const point = points.get(time + step);
     if (!bar || !previous || !point) throw new Error("A liquidation replay interval is missing.");
+    const interval = { time, low: bar.low, high: bar.high, openInterestChange: point.quantity - previous.quantity, long: 0, short: 0 };
     cohorts = cohorts.filter((cohort) => {
-      if (cohort.openedAt <= time - LIQUIDATION_LOOKBACK_MS) return false;
+      if (cohort.openedAt !== null && cohort.openedAt <= time - LIQUIDATION_POSITION_HISTORY_MS) return false;
       if (survivesBar(cohort, bar)) return true;
-      if (time >= from) totals[cohort.side] += cohort.quantity * cohort.price;
+      if (time >= from) interval[cohort.side] += cohort.quantity * cohort.price;
       return false;
     });
-    applyInterestChange(cohorts, previous, point, bar, weights);
+    const replacement = applyInterestChange(cohorts, previous, point, bar, weights, marginProfile);
+    if (time >= from) {
+      intervals.push({ ...interval, ...replacement });
+      totals.long += interval.long;
+      totals.short += interval.short;
+    }
   }
-  return { model: liquidationModel, ...totals, total: totals.long + totals.short, capitalization, turnover, marginProfile };
+  return { model: liquidationModel, ...totals, total: totals.long + totals.short, capitalization, turnover, marginProfile, intervals };
 }
 
 export function estimateLiquidationLevels(
@@ -304,7 +411,7 @@ export function estimateLiquidationLevels(
 ) {
   const leverageWeighting = getLeverageWeighting(symbol, capitalization, turnover, marginProfile);
   const byTime = new Map(bars.map((bar) => [bar.time, bar]));
-  const points = interest.filter((point) => point.time >= asOf - LIQUIDATION_LOOKBACK_MS &&
+  const points = interest.filter((point) => point.time >= asOf - LIQUIDATION_POSITION_HISTORY_MS &&
     point.time <= asOf && byTime.has(point.time - LIQUIDATION_INTERVAL_MS));
   const first = points[0];
   const last = points.at(-1);
@@ -312,7 +419,7 @@ export function estimateLiquidationLevels(
     throw new Error("Recent mark price and open interest data are incomplete.");
   }
 
-  let cohorts: Cohort[] = [];
+  let cohorts = initialCohorts(first, byTime.get(first.time - LIQUIDATION_INTERVAL_MS), leverageWeighting.weights, marginProfile);
   for (let index = 1; index < points.length; index++) {
     const previous = points[index - 1];
     const point = points[index];
@@ -321,7 +428,7 @@ export function estimateLiquidationLevels(
       throw new Error("A liquidation model input interval is missing.");
     }
     cohorts = cohorts.filter((cohort) => survivesBar(cohort, bar));
-    applyInterestChange(cohorts, previous, point, bar, leverageWeighting.weights);
+    applyInterestChange(cohorts, previous, point, bar, leverageWeighting.weights, marginProfile);
   }
 
   const laterBars = bars.filter((bar) => bar.time >= last.time && bar.time <= asOf);
@@ -329,8 +436,10 @@ export function estimateLiquidationLevels(
   const high = Math.max(markPrice, ...laterBars.map((bar) => bar.high));
   const width = markPrice * bandFraction;
   const buckets = new Map<number, { quantity: number; notional: number }>();
+  const coveredQuantity = { long: 0, short: 0 };
   for (const { side, price, quantity } of cohorts) {
     if (quantity <= 0 || price <= 0 || (side === "long" ? price >= low : price <= high)) continue;
+    coveredQuantity[side] += quantity;
     const bucket = Math.floor((price - markPrice) / width);
     const group = buckets.get(bucket) ?? { quantity: 0, notional: 0 };
     group.quantity += quantity;
@@ -362,9 +471,10 @@ export function estimateLiquidationLevels(
     exchange: "binance" as const, symbol, model: liquidationModel,
     amountBasis: "modeled-notional" as const, validationStatus: "uncalibrated" as const,
     asOf, markPrice, interestFrom: first.time, interestThrough: last.time,
-    lookbackMs: LIQUIDATION_LOOKBACK_MS, intervalMs: LIQUIDATION_INTERVAL_MS,
+    lookbackMs: last.time - first.time, intervalMs: LIQUIDATION_INTERVAL_MS,
+    coverage: { openInterestQuantity: last.quantity, longQuantity: coveredQuantity.long, shortQuantity: coveredQuantity.short },
     bandWidthPercent: bandFraction * 100, leverageScenarios: leverageWeighting.weights.map(({ leverage }) => leverage),
-    leverageWeighting, marginScenarios, positionAddScenario, levels,
+    leverageWeighting, marginScenarios, positionAddScenario, reducedMarginBuffer, levels,
   };
 }
 

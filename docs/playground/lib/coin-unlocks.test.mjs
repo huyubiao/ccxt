@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import snapshot from "./coin-unlock-snapshot.json" with { type: "json" };
-import { getNextUnlock, getTokenomics } from "./coin-unlocks.ts";
+import { getTokenomics } from "./coin-unlocks.ts";
+
+test("INIT exposes its next cliff even when earlier linear releases fill the table", () => {
+  const init = getTokenomics("INITUSDT", snapshot.contracts.INITUSDT.updatedAt);
+  assert.ok(init.events.length <= 3);
+  const cliff = init.nextCliff ?? init.events.find((event) => event.mechanism === "cliff");
+  assert.equal(cliff?.sourceName, "DefiLlama");
+  assert.equal(cliff?.amount, 7_340_000);
+});
 
 test("Bitcoin issuance uses the saved height and target block interval", () => {
   const btc = getTokenomics("BTCUSDT", snapshot.generatedAt);
@@ -23,11 +31,13 @@ test("SUI shows a locked balance and three ordered future releases with consiste
   assert.ok(sui.lockedAmount > 0);
   assert.equal(sui.events.length, 3);
   for (const [i, event] of sui.events.entries()) {
-    assert.ok(event.time > (sui.events[i - 1]?.time ?? snapshot.generatedAt));
+    assert.ok(event.time > snapshot.generatedAt);
+    assert.ok(event.time >= (sui.events[i - 1]?.time ?? snapshot.generatedAt));
     assert.equal(event.supplyPercentage, event.amount / sui.percentageSupply * 100);
     if (event.timeKind === "interval-estimate") assert.ok(event.periodStart < event.time);
   }
-  assert.equal(getNextUnlock("SUIUSDT", sui.events[0].time).time, sui.events[1].time);
+  const afterFirst = getTokenomics("SUIUSDT", sui.events[0].time).events;
+  assert.ok(afterFirst.length && afterFirst.every((event) => event.time > sui.events[0].time));
   const interval = sui.events.find((event) => event.timeKind === "interval-estimate");
   assert.ok(interval);
   assert.ok(!getTokenomics("SUIUSDT", interval.periodStart + 1).events.some((event) => event.time === interval.time));
@@ -38,7 +48,7 @@ test("missing coverage and unlimited issuance have explicit distinct states", ()
   assert.equal(unknown.kind, "unknown");
   assert.equal(unknown.lockedAmount, null);
   assert.equal(unknown.supplyLimit, "unknown");
-  assert.equal(getNextUnlock("MISSING_TEST"), null);
+  assert.deepEqual(unknown.events, []);
   assert.equal(getTokenomics("ETHUSDT").supplyLimit, "unlimited");
 });
 

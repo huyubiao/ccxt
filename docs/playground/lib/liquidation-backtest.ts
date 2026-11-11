@@ -9,12 +9,26 @@ type Reference = {
   source: "Swolecharts" | "CoinBoss" | "CryptoHFTData";
   status: "covered" | "partial" | "unavailable";
   amounts: Amounts | null;
+  intervals: Record<number, Amounts>;
   detail: string;
 };
 
 const totals = (long: number, short: number) => ({ long, short, total: long + short });
+function addInterval(intervals: Record<number, Amounts>, time: number, long: number, short: number) {
+  const start = Math.floor(time / LIQUIDATION_INTERVAL_MS) * LIQUIDATION_INTERVAL_MS;
+  const previous = intervals[start];
+  intervals[start] = totals((previous?.long ?? 0) + long, (previous?.short ?? 0) + short);
+}
+function sumIntervals(intervals: Reference["intervals"]) {
+  let long = 0, short = 0;
+  for (const interval of Object.values(intervals)) {
+    long += interval.long;
+    short += interval.short;
+  }
+  return totals(long, short);
+}
 const unavailable = (source: Reference["source"], detail: string): Reference => ({
-  source, status: "unavailable", amounts: null, detail,
+  source, status: "unavailable", amounts: null, detail, intervals: {},
 });
 
 async function getJson<T>(url: URL, signal: AbortSignal): Promise<T> {
@@ -33,7 +47,7 @@ async function swoleReference(symbol: string, from: number, to: number): Promise
     !Array.isArray(data.long) || !Array.isArray(data.short) || data.long.length !== data.t.length || data.short.length !== data.t.length) {
     return unavailable("Swolecharts", "未返回可用的币安合约分钟数据。");
   }
-  let long = 0, short = 0;
+  const intervals: Reference["intervals"] = {};
   const seen = new Set<number>();
   for (const [index, time] of data.t.entries()) {
     if (time < from || time >= to) continue;
@@ -42,12 +56,11 @@ async function swoleReference(symbol: string, from: number, to: number): Promise
       return unavailable("Swolecharts", "分钟数据包含无效或重复记录。");
     }
     seen.add(time);
-    long += a;
-    short += b;
+    addInterval(intervals, time, a, b);
   }
   if (!seen.size) return unavailable("Swolecharts", "窗口内未返回记录，无法确认零爆仓。");
   const covered = data.start <= from && data.end >= to && Array.isArray(data.gaps) && !data.gaps.length;
-  return { source: "Swolecharts", status: covered ? "covered" : "partial", amounts: totals(long, short),
+  return { source: "Swolecharts", status: covered ? "covered" : "partial", amounts: sumIntervals(intervals), intervals,
     detail: covered ? "币安合约的 1 分钟统计，接口未报告缺口。" : data.gaps?.length
       ? `币安合约的 1 分钟统计，接口报告 ${data.gaps.length} 处缺口。` : "接口未确认窗口覆盖。" };
 }
@@ -59,7 +72,8 @@ async function coinBossReference(symbol: string, from: number, to: number): Prom
   const limit = 1000, pageStride = 950, maxPages = 8;
   const signal = AbortSignal.timeout(14_000);
   const seen = new Set<string>();
-  let long = 0, short = 0, covered = false, newest = -Infinity;
+  let covered = false, newest = -Infinity;
+  const intervals: Reference["intervals"] = {};
   let previousPage = new Set<string>();
   let joined = true;
   for (let page = 0; page < maxPages; page++) {
@@ -79,8 +93,7 @@ async function coinBossReference(symbol: string, from: number, to: number): Prom
       keys.add(key);
       if (time < from || time >= to || seen.has(key)) continue;
       seen.add(key);
-      if (row.side === "LONG") long += amount;
-      else short += amount;
+      addInterval(intervals, time, row.side === "LONG" ? amount : 0, row.side === "SHORT" ? amount : 0);
     }
     if (page > 0 && ![...keys].some((key) => previousPage.has(key))) joined = false;
     previousPage = keys;
@@ -91,7 +104,7 @@ async function coinBossReference(symbol: string, from: number, to: number): Prom
     if (response.data.length < limit) break;
   }
   if (!seen.size && !covered) return unavailable("CoinBoss", "未找到可用的窗口内记录，无法确认零爆仓。");
-  return { source: "CoinBoss", status: covered ? "covered" : "partial", amounts: totals(long, short),
+  return { source: "CoinBoss", status: covered ? "covered" : "partial", amounts: sumIntervals(intervals), intervals,
     detail: `币安逐笔档案，窗口内去重后 ${seen.size} 笔。${covered ? "查询记录跨过窗口两端，档案仍可能漏报。" : "分页结果未确认覆盖完整窗口。"}` };
 }
 
@@ -113,7 +126,8 @@ async function cryptoHFTReference(symbol: string, from: number, to: number): Pro
   const hours = Array.from({ length: Math.ceil((to - startHour) / hourMs) }, (_, i) => startHour + i * hourMs);
   const signal = AbortSignal.timeout(14_000);
   const seen = new Set<string>();
-  let long = 0, short = 0, availableHours = 0;
+  let availableHours = 0;
+  const intervals: Reference["intervals"] = {};
   for (let index = 0; index < hours.length && !signal.aborted; index += 6) {
     const batch = await Promise.all(hours.slice(index, index + 6).map((hour) =>
       readCryptoHFTHour(symbol, hour, signal).catch(() => null)));
@@ -128,15 +142,14 @@ async function cryptoHFTReference(symbol: string, from: number, to: number): Pro
         const key = JSON.stringify([time, row.side, price, quantity]);
         if (seen.has(key)) continue;
         seen.add(key);
-        if (row.side === "SELL") long += price * quantity;
-        else short += price * quantity;
+        addInterval(intervals, time, row.side === "SELL" ? price * quantity : 0, row.side === "BUY" ? price * quantity : 0);
       }
     }
   }
   const detail = `成功读取 ${availableHours} / ${hours.length} 个小时档案，窗口内 ${seen.size} 笔，按成交均价 × 已成交数量统计。`;
   if (!seen.size) return unavailable("CryptoHFTData", `${detail} 无法确认零爆仓。`);
   return { source: "CryptoHFTData", status: availableHours === hours.length ? "covered" : "partial",
-    amounts: totals(long, short), detail: availableHours === hours.length ? detail : `${detail} 缺失档案可能尚未发布或该小时无记录。` };
+    amounts: sumIntervals(intervals), intervals, detail: availableHours === hours.length ? detail : `${detail} 缺失档案可能尚未发布或该小时无记录。` };
 }
 
 const cache = new Map<string, { expires: number; result: ReturnType<typeof loadBacktest> }>();
@@ -163,7 +176,13 @@ async function loadBacktest(instrument: MarketInstrument, from: number, to: numb
   const references = observations.map((reference) => {
     const amounts = reference.amounts;
     const delta = model && amounts ? model.total - amounts.total : null;
-    return { ...reference, delta, deltaPercent: delta !== null && amounts && amounts.total > 0 ? delta / amounts.total * 100 : null };
+    const compareSide = (side: "long" | "short") => {
+      const difference = model && amounts ? model[side] - amounts[side] : null;
+      const baseline = amounts?.[side] ?? 0;
+      return { delta: difference, deltaPercent: difference !== null && baseline > 0 ? difference / baseline * 100 : null };
+    };
+    return { ...reference, delta, deltaPercent: delta !== null && amounts && amounts.total > 0 ? delta / amounts.total * 100 : null,
+      longComparison: compareSide("long"), shortComparison: compareSide("short") };
   });
   const modelError = model ? null : instrument.onboardAt > from ? "该合约上市未满 24 小时，暂无法回放完整窗口。"
     : "币安历史标记价或持仓数据不足，暂时无法回放模型。";

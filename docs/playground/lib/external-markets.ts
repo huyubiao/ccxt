@@ -45,6 +45,11 @@ export async function getOkxFundingData(instId: string, limit: number) {
   };
 }
 
+export async function getOkxOrderBook(instId: string) {
+  const [book] = await okx<{ bids: string[][]; asks: string[][]; ts: string }>("market/books-full", { instId, sz: 5000 });
+  return { bids: book?.bids, asks: book?.asks, time: Number(book?.ts) };
+}
+
 type OkxPair = {
   instId: string; state: string; listTime: string; baseCcy: string; quoteCcy: string;
   uly: string; settleCcy: string; ctType: string; ctValCcy: string; ctVal: string;

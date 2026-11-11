@@ -1,0 +1,64 @@
+{
+  "alaya-ai": {
+    "symbol": "AGT",
+    "maxSupply": 5000000000,
+    "sourceName": "Alaya AI",
+    "sourceUrl": "https://alaya-ai.gitbook.io/alaya-ai/user-manual/usdagt-token",
+    "events": [
+      {
+        "date": "2026-11-16T00:00:00+08:00",
+        "sourceName": "RootData",
+        "sourceUrl": "https://cn.rootdata.com/projects/detail/alaya?k=MTI0MzY%3D",
+        "amount": 164160000,
+        "mechanism": null,
+        "note": "第三方排期。Chain Broker 对同一天列出约 7,780 万枚用户奖励。各来源的统计口径有差异，实际释放时间和数量待确认。",
+        "allocations": [],
+        "sourceChecks": [
+          {
+            "sourceName": "Tokenomics.com",
+            "sourceUrl": "https://app.tokenomics.com/tokenomics/alaya-ai/unlocks",
+            "amount": 87500000,
+            "agrees": false
+          }
+        ]
+      }
+    ]
+  },
+  "arbitrum": {
+    "symbol": "ARB",
+    "sourceName": "Arbitrum Foundation",
+    "sourceUrl": "https://docs.arbitrum.foundation/token-supply",
+    "events": [
+      {
+        "date": "2026-11-15T00:29:00Z",
+        "sourceName": "DefiLlama",
+        "sourceUrl": "https://defillama.com/unlocks/arbitrum-foundation",
+        "amount": 92650000,
+        "note": "按 DefiLlama 公开页面显示值取整。项目方将团队、贡献者和投资人归属按固定秒数计算每月间隔。",
+        "allocations": [
+          { "name": "Team, Contributors & Advisors", "amount": 56130000 },
+          { "name": "Investors", "amount": 36520000 }
+        ]
+      }
+    ]
+  },
+  "initia": {
+    "symbol": "INIT",
+    "maxSupply": 1000000000,
+    "sourceName": "币安研究院",
+    "sourceUrl": "https://www.binance.com/en-IN/research/projects/initia",
+    "events": [
+      {
+        "date": "2027-04-24T11:37:00Z",
+        "sourceName": "DefiLlama",
+        "sourceUrl": "https://defillama.com/unlocks/initia",
+        "amount": 7340000,
+        "note": "数量按公开页面显示值取整。这笔只包含基金会与 Echo.xyz 社区销售的集中解锁。",
+        "allocations": [
+          { "name": "Foundation", "amount": 4840000 },
+          { "name": "Echo.xyz Community Sale", "amount": 2500000 }
+        ]
+      }
+    ]
+  }
+}

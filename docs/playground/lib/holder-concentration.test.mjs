@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { holderMarketCapPercentage, parseBitcoinRichList, rawInteger, tokenAmount, withHolderMarketCap } from "./holder-concentration.ts";
+import { geckoHolderPlatforms, supportedHolderPlatforms } from "./holder-platforms.ts";
 
 test("token balances preserve precision when converting base units", () => {
   assert.equal(tokenAmount(50162736194264694000000000000000n, 18), "50162736194264.694");
@@ -59,4 +60,15 @@ test("the Bitcoin source must contain all 100 distinct addresses in rank order",
   assert.equal(parsed[0].raw, 100012000000n);
   assert.throws(() => parseBitcoinRichList(rows.slice(0, 99).join("")));
   assert.throws(() => parseBitcoinRichList(rows[0] + rows.join("")));
+});
+
+test("verified token contracts can fall back across chains while keeping the primary first", () => {
+  const address = "0x" + "ab".repeat(20);
+  const platforms = geckoHolderPlatforms({ ethereum: address, "arbitrum-one": address, solana: "not-evm",
+    "binance-smart-chain": address, "polygon-pos": address, xdai: "" }, "arbitrum-one");
+  const duplicate = { contractChainId: 1, contractAddress: "0x" + "AB".repeat(20) };
+  assert.deepEqual(supportedHolderPlatforms([...platforms, duplicate]).map((row) => row.contractChainId), [42161, 1, 56, 137]);
+  assert.deepEqual(supportedHolderPlatforms([
+    { contractChainId: 1, contractAddress: address }, { contractChainId: 42161, contractAddress: address },
+  ], "arbitrum").map((row) => row.contractChainId), [42161, 1]);
 });

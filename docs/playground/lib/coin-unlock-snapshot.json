@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generatedAt": 1794022740667,
+  "generatedAt": 1794389178745,
   "blockHeights": {
     "BTCUSDT": {
       "height": 974884,
@@ -974,51 +974,8 @@
     },
     "AGTUSDT": {
       "symbol": "AGT",
-      "time": 1796083200000,
-      "amount": 90398246.25502375,
-      "mechanism": "linear",
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "KOL Round 2",
-          "amount": 4705882.35294118,
-          "group": "other"
-        },
-        {
-          "name": "Ecosystem Fund",
-          "amount": 14285714.28571429,
-          "group": "other"
-        },
-        {
-          "name": "Community Treasury",
-          "amount": 8571428.57142857,
-          "group": "other"
-        },
-        {
-          "name": "Private Round",
-          "amount": 23529411.76470588,
-          "group": "other"
-        },
-        {
-          "name": "Seed Round",
-          "amount": 23529411.76470588,
-          "group": "insiders"
-        },
-        {
-          "name": "Team",
-          "amount": 11428571.42857143,
-          "group": "insiders"
-        },
-        {
-          "name": "Advisor",
-          "amount": 4347826.08695652,
-          "group": "insiders"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/alaya-ai/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "alaya-ai",
-      "updatedAt": 1794022325275,
+      "cmcSlug": "alaya-ai",
       "lockedAmount": 1476938253.5622945,
       "maxSupply": 5000000000,
       "supplyLimit": "capped",
@@ -1026,9 +983,30 @@
       "percentageBasis": "maxSupply",
       "events": [
         {
+          "sourceName": "RootData",
+          "sourceUrl": "https://cn.rootdata.com/projects/detail/alaya?k=MTI0MzY%3D",
+          "note": "第三方排期。Chain Broker 对同一天列出约 7,780 万枚用户奖励。各来源的统计口径有差异，实际释放时间和数量待确认。",
+          "symbol": "AGT",
+          "time": 1794758400000,
+          "amount": 164160000,
+          "timeKind": "scheduled",
+          "mechanism": null,
+          "allocations": [],
+          "allocationComplete": false,
+          "sourceChecks": [
+            {
+              "sourceName": "Tokenomics.com",
+              "sourceUrl": "https://app.tokenomics.com/tokenomics/alaya-ai/unlocks",
+              "amount": 87500000,
+              "agrees": false
+            }
+          ]
+        },
+        {
           "symbol": "AGT",
           "time": 1796083200000,
           "amount": 90398246.25502375,
+          "timeKind": "scheduled",
           "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
@@ -1050,7 +1028,7 @@
             {
               "name": "Private Round",
               "amount": 23529411.76470588,
-              "group": "other"
+              "group": "insiders"
             },
             {
               "name": "Seed Round",
@@ -1073,10 +1051,10 @@
         },
         {
           "symbol": "AGT",
-          "time": 1799280000000,
-          "periodStart": 1798675200000,
+          "time": 1799020800000,
+          "periodStart": 1798416000000,
           "timeKind": "interval-estimate",
-          "amount": 90398246.25502379,
+          "amount": 90398246.25502378,
           "allocations": [
             {
               "name": "Advisor",
@@ -1086,7 +1064,7 @@
             {
               "name": "Private Round",
               "amount": 23529411.764705896,
-              "group": "other"
+              "group": "insiders"
             },
             {
               "name": "Seed Round",
@@ -1099,13 +1077,13 @@
               "group": "insiders"
             },
             {
-              "name": "KOL Round 2",
-              "amount": 4705882.352941178,
+              "name": "Community Treasury",
+              "amount": 8571428.571428582,
               "group": "other"
             },
             {
-              "name": "Community Treasury",
-              "amount": 8571428.571428582,
+              "name": "KOL Round 2",
+              "amount": 4705882.352941178,
               "group": "other"
             },
             {
@@ -1121,8 +1099,8 @@
         },
         {
           "symbol": "AGT",
-          "time": 1801699200000,
-          "periodStart": 1801094400000,
+          "time": 1801440000000,
+          "periodStart": 1800835200000,
           "timeKind": "interval-estimate",
           "amount": 90398246.25502373,
           "allocations": [
@@ -1134,7 +1112,7 @@
             {
               "name": "Private Round",
               "amount": 23529411.764705867,
-              "group": "other"
+              "group": "insiders"
             },
             {
               "name": "Seed Round",
@@ -1167,7 +1145,10 @@
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/alaya-ai/#token-unlocks"
         }
-      ]
+      ],
+      "sourceName": "Alaya AI",
+      "sourceUrl": "https://alaya-ai.gitbook.io/alaya-ai/user-manual/usdagt-token",
+      "updatedAt": 1794388943861
     },
     "AINUSDT": {
       "symbol": "AIN",
@@ -2139,27 +2120,9 @@
     },
     "APTUSDT": {
       "symbol": "APT",
-      "time": 1794355200000,
-      "amount": 4581658.48543697,
-      "mechanism": "linear",
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "Community",
-          "amount": 3237120.67031092,
-          "group": "other"
-        },
-        {
-          "name": "Foundation",
-          "amount": 1344537.81512605,
-          "group": "other"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "aptos",
-      "updatedAt": 1794022325275,
-      "lockedAmount": 325297752.4660255,
+      "cmcSlug": "aptos",
+      "lockedAmount": 320716093.9805885,
       "maxSupply": 2100000000,
       "supplyLimit": "capped",
       "percentageSupply": 2100000000,
@@ -2167,8 +2130,9 @@
       "events": [
         {
           "symbol": "APT",
-          "time": 1794355200000,
+          "time": 1796947200000,
           "amount": 4581658.48543697,
+          "timeKind": "scheduled",
           "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
@@ -2185,29 +2149,6 @@
           ],
           "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks",
           "sourceName": "CoinMarketCap"
-        },
-        {
-          "symbol": "APT",
-          "time": 1796947200000,
-          "periodStart": 1796860800000,
-          "timeKind": "interval-estimate",
-          "amount": 4581658.485436976,
-          "allocations": [
-            {
-              "name": "Foundation",
-              "amount": 1344537.8151260614,
-              "group": "other"
-            },
-            {
-              "name": "Community",
-              "amount": 3237120.6703109145,
-              "group": "other"
-            }
-          ],
-          "allocationComplete": true,
-          "mechanism": null,
-          "sourceName": "CoinMarketCap",
-          "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks"
         },
         {
           "symbol": "APT",
@@ -2231,27 +2172,40 @@
           "mechanism": null,
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks"
+        },
+        {
+          "symbol": "APT",
+          "time": 1802304000000,
+          "periodStart": 1802217600000,
+          "timeKind": "interval-estimate",
+          "amount": 4581658.485436961,
+          "allocations": [
+            {
+              "name": "Foundation",
+              "amount": 1344537.8151260465,
+              "group": "other"
+            },
+            {
+              "name": "Community",
+              "amount": 3237120.6703109145,
+              "group": "other"
+            }
+          ],
+          "allocationComplete": true,
+          "mechanism": null,
+          "sourceName": "CoinMarketCap",
+          "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks"
         }
-      ]
+      ],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/aptos/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "ARBUSDT": {
       "symbol": "ARB",
-      "time": 1794080160000,
-      "amount": 478781.65092402,
-      "mechanism": "linear",
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "Daos in Arbitrum ecosystem",
-          "amount": 478781.65092402,
-          "group": "other"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/arbitrum/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "arbitrum",
-      "updatedAt": 1794022325275,
-      "lockedAmount": 447746672.46544087,
+      "cmcSlug": "arbitrum",
+      "lockedAmount": 445831545.86174476,
       "maxSupply": 10000000000,
       "supplyLimit": "capped",
       "percentageSupply": 10000000000,
@@ -2259,8 +2213,9 @@
       "events": [
         {
           "symbol": "ARB",
-          "time": 1794080160000,
+          "time": 1794425760000,
           "amount": 478781.65092402,
+          "timeKind": "scheduled",
           "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
@@ -2275,8 +2230,8 @@
         },
         {
           "symbol": "ARB",
-          "time": 1794182400000,
-          "periodStart": 1794096000000,
+          "time": 1794528000000,
+          "periodStart": 1794441600000,
           "timeKind": "interval-estimate",
           "amount": 478781.65092408657,
           "allocations": [
@@ -2293,8 +2248,8 @@
         },
         {
           "symbol": "ARB",
-          "time": 1794268800000,
-          "periodStart": 1794182400000,
+          "time": 1794614400000,
+          "periodStart": 1794528000000,
           "timeKind": "interval-estimate",
           "amount": 478781.65092396736,
           "allocations": [
@@ -2308,8 +2263,34 @@
           "mechanism": null,
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/arbitrum/#token-unlocks"
+        },
+        {
+          "sourceName": "DefiLlama",
+          "sourceUrl": "https://defillama.com/unlocks/arbitrum-foundation",
+          "note": "按 DefiLlama 公开页面显示值取整。项目方将团队、贡献者和投资人归属按固定秒数计算每月间隔。",
+          "symbol": "ARB",
+          "time": 1794702540000,
+          "amount": 92650000,
+          "timeKind": "scheduled",
+          "mechanism": "cliff",
+          "allocations": [
+            {
+              "name": "Team, Contributors & Advisors",
+              "amount": 56130000,
+              "group": "insiders"
+            },
+            {
+              "name": "Investors",
+              "amount": 36520000,
+              "group": "insiders"
+            }
+          ],
+          "allocationComplete": true
         }
-      ]
+      ],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/arbitrum/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "ARCUSDT": {
       "symbol": "ARC",
@@ -4702,6 +4683,20 @@
       "sourceUrl": "https://coinmarketcap.com/currencies/coin98/#token-unlocks",
       "sourceName": "CoinMarketCap"
     },
+    "CAKEUSDT": {
+      "symbol": "CAKE",
+      "geckoId": "pancakeswap-token",
+      "cmcSlug": "pancakeswap",
+      "lockedAmount": null,
+      "maxSupply": 400000000,
+      "supplyLimit": "capped",
+      "percentageSupply": 400000000,
+      "percentageBasis": "maxSupply",
+      "events": [],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/pancakeswap/#token-unlocks",
+      "updatedAt": 1794388943861
+    },
     "CARVUSDT": {
       "symbol": "CARV",
       "time": 1794297600000,
@@ -5334,41 +5329,19 @@
     },
     "CHZUSDT": {
       "symbol": "CHZ",
-      "time": 1794096000000,
-      "amount": 1698861.9042033,
-      "mechanism": "linear",
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "Rewards for Validators/Delegators",
-          "amount": 1104260.23774725,
-          "group": "other"
-        },
-        {
-          "name": "Ecosystem and Operational (E&O) Distribution",
-          "amount": 424715.47604396,
-          "group": "other"
-        },
-        {
-          "name": "Community Vault, $CHZ LP (liquidity provider) and possible Shared Security Restaking Rewards:",
-          "amount": 169886.19041209,
-          "group": "other"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/chiliz/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "chiliz",
-      "updatedAt": 1794022325275,
-      "lockedAmount": 11233474852.108929,
+      "cmcSlug": "chiliz",
+      "lockedAmount": 11226679404.492115,
       "maxSupply": null,
       "supplyLimit": "unlimited",
-      "percentageSupply": 10599780893,
+      "percentageSupply": 10606454577,
       "percentageBasis": "totalSupply",
       "events": [
         {
           "symbol": "CHZ",
-          "time": 1794096000000,
+          "time": 1794441600000,
           "amount": 1698861.9042033,
+          "timeKind": "scheduled",
           "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
@@ -5393,8 +5366,8 @@
         },
         {
           "symbol": "CHZ",
-          "time": 1794182400000,
-          "periodStart": 1794096000000,
+          "time": 1794528000000,
+          "periodStart": 1794441600000,
           "timeKind": "interval-estimate",
           "amount": 1698861.9042034745,
           "allocations": [
@@ -5421,10 +5394,10 @@
         },
         {
           "symbol": "CHZ",
-          "time": 1794268800000,
-          "periodStart": 1794182400000,
+          "time": 1794614400000,
+          "periodStart": 1794528000000,
           "timeKind": "interval-estimate",
-          "amount": 1698861.9042032063,
+          "amount": 1698861.904203266,
           "allocations": [
             {
               "name": "Community Vault, $CHZ LP (liquidity provider) and possible Shared Security Restaking Rewards:",
@@ -5433,7 +5406,7 @@
             },
             {
               "name": "Ecosystem and Operational (E&O) Distribution",
-              "amount": 424715.4760439396,
+              "amount": 424715.4760439992,
               "group": "other"
             },
             {
@@ -5447,7 +5420,10 @@
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/chiliz/#token-unlocks"
         }
-      ]
+      ],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/chiliz/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "CKBUSDT": {
       "symbol": "CKB",
@@ -5758,6 +5734,20 @@
           "sourceUrl": "https://coinmarketcap.com/currencies/collect-on-fanable/#token-unlocks"
         }
       ]
+    },
+    "COMPUSDT": {
+      "symbol": "COMP",
+      "geckoId": "compound-governance-token",
+      "cmcSlug": "compound",
+      "lockedAmount": null,
+      "maxSupply": null,
+      "supplyLimit": "unknown",
+      "percentageSupply": 10000000,
+      "percentageBasis": "totalSupply",
+      "events": [],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/compound/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "COOKIEUSDT": {
       "symbol": "COOKIE",
@@ -10009,22 +9999,9 @@
     },
     "INITUSDT": {
       "symbol": "INIT",
-      "time": 1794042000000,
-      "amount": 34003.82710215,
-      "mechanism": "linear",
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "Enshrined Liquidity and Staking",
-          "amount": 34003.82710215,
-          "group": "other"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/initia/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "initia",
-      "updatedAt": 1794022325275,
-      "lockedAmount": 665807067.8225701,
+      "cmcSlug": "initia",
+      "lockedAmount": 665671052.5141615,
       "maxSupply": 1000000000,
       "supplyLimit": "capped",
       "percentageSupply": 1000000000,
@@ -10032,8 +10009,9 @@
       "events": [
         {
           "symbol": "INIT",
-          "time": 1794042000000,
+          "time": 1794387600000,
           "amount": 34003.82710215,
+          "timeKind": "scheduled",
           "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
@@ -10048,8 +10026,8 @@
         },
         {
           "symbol": "INIT",
-          "time": 1794182400000,
-          "periodStart": 1794096000000,
+          "time": 1794528000000,
+          "periodStart": 1794441600000,
           "timeKind": "interval-estimate",
           "amount": 34003.82710215077,
           "allocations": [
@@ -10066,8 +10044,8 @@
         },
         {
           "symbol": "INIT",
-          "time": 1794268800000,
-          "periodStart": 1794182400000,
+          "time": 1794614400000,
+          "periodStart": 1794528000000,
           "timeKind": "interval-estimate",
           "amount": 34003.82710215077,
           "allocations": [
@@ -10081,8 +10059,34 @@
           "mechanism": null,
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/initia/#token-unlocks"
+        },
+        {
+          "sourceName": "DefiLlama",
+          "sourceUrl": "https://defillama.com/unlocks/initia",
+          "note": "数量按公开页面显示值取整。这笔只包含基金会与 Echo.xyz 社区销售的集中解锁。",
+          "symbol": "INIT",
+          "time": 1808566620000,
+          "amount": 7340000,
+          "timeKind": "scheduled",
+          "mechanism": "cliff",
+          "allocations": [
+            {
+              "name": "Foundation",
+              "amount": 4840000,
+              "group": "other"
+            },
+            {
+              "name": "Echo.xyz Community Sale",
+              "amount": 2500000,
+              "group": "users"
+            }
+          ],
+          "allocationComplete": true
         }
-      ]
+      ],
+      "sourceName": "币安研究院",
+      "sourceUrl": "https://www.binance.com/en-IN/research/projects/initia",
+      "updatedAt": 1794314859028
     },
     "INUSDT": {
       "symbol": "IN",
@@ -11185,6 +11189,20 @@
         }
       ]
     },
+    "KNCUSDT": {
+      "symbol": "KNC",
+      "geckoId": "kyber-network",
+      "cmcSlug": "kyber-network-crystal-v2",
+      "lockedAmount": null,
+      "maxSupply": null,
+      "supplyLimit": "unknown",
+      "percentageSupply": 241052979.7297613,
+      "percentageBasis": "totalSupply",
+      "events": [],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/kyber-network-crystal-v2/#token-unlocks",
+      "updatedAt": 1794389178745
+    },
     "KOMAUSDT": {
       "symbol": "KOMA",
       "geckoId": "koma-inu",
@@ -11915,6 +11933,84 @@
       "events": [],
       "sourceUrl": "https://coinmarketcap.com/currencies/chainlink/#token-unlocks",
       "sourceName": "CoinMarketCap"
+    },
+    "LISTAUSDT": {
+      "symbol": "LISTA",
+      "geckoId": "lista",
+      "cmcSlug": "lista-dao",
+      "lockedAmount": 301924004.73740095,
+      "maxSupply": 800000000,
+      "supplyLimit": "capped",
+      "percentageSupply": 800000000,
+      "percentageBasis": "maxSupply",
+      "events": [
+        {
+          "symbol": "LISTA",
+          "time": 1795564800000,
+          "amount": 2119245.28301887,
+          "timeKind": "scheduled",
+          "mechanism": "linear",
+          "allocationComplete": true,
+          "allocations": [
+            {
+              "name": "Community",
+              "amount": 2119245.28301887,
+              "group": "other"
+            }
+          ],
+          "sourceUrl": "https://coinmarketcap.com/currencies/lista-dao/#token-unlocks",
+          "sourceName": "CoinMarketCap"
+        },
+        {
+          "symbol": "LISTA",
+          "time": 1796601600000,
+          "periodStart": 1795996800000,
+          "timeKind": "interval-estimate",
+          "amount": 21163690.476190463,
+          "allocations": [
+            {
+              "name": "Team",
+              "amount": 1520833.3333333302,
+              "group": "insiders"
+            },
+            {
+              "name": "Investors & Advisors",
+              "amount": 19642857.142857134,
+              "group": "insiders"
+            }
+          ],
+          "allocationComplete": true,
+          "mechanism": null,
+          "sourceName": "CoinMarketCap",
+          "sourceUrl": "https://coinmarketcap.com/currencies/lista-dao/#token-unlocks"
+        },
+        {
+          "symbol": "LISTA",
+          "time": 1797811200000,
+          "periodStart": 1797206400000,
+          "timeKind": "interval-estimate",
+          "amount": 6477272.727272734,
+          "allocations": [
+            {
+              "name": "DAO Treasury",
+              "amount": 2727272.727272734,
+              "group": "other"
+            },
+            {
+              "name": "Ecosystem",
+              "amount": 3750000,
+              "group": "other"
+            }
+          ],
+          "allocationComplete": true,
+          "mechanism": null,
+          "sourceName": "CoinMarketCap",
+          "sourceUrl": "https://coinmarketcap.com/currencies/lista-dao/#token-unlocks"
+        }
+      ],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/lista-dao/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "LITUSDT": {
       "symbol": "LIT",
@@ -14050,6 +14146,20 @@
           "sourceUrl": "https://coinmarketcap.com/currencies/myx-finance/#token-unlocks"
         }
       ]
+    },
+    "NEARUSDT": {
+      "symbol": "NEAR",
+      "geckoId": "near",
+      "cmcSlug": "near-protocol",
+      "lockedAmount": 0,
+      "maxSupply": null,
+      "supplyLimit": "unlimited",
+      "percentageSupply": 1311395025,
+      "percentageBasis": "totalSupply",
+      "events": [],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/near-protocol/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "NEOUSDT": {
       "symbol": "NEO",
@@ -18544,36 +18654,8 @@
     },
     "SUIUSDT": {
       "symbol": "SUI",
-      "time": 1796083200000,
-      "amount": 20597054.33333333,
-      "mechanism": null,
-      "allocationComplete": true,
-      "allocations": [
-        {
-          "name": "Mysten Labs Treasury",
-          "amount": 2069367,
-          "group": "other"
-        },
-        {
-          "name": "Community Reserves",
-          "amount": 4000000,
-          "group": "other"
-        },
-        {
-          "name": "Stake Subsidies",
-          "amount": 7625597.33333333,
-          "group": "other"
-        },
-        {
-          "name": "Early Contributors",
-          "amount": 6902090,
-          "group": "insiders"
-        }
-      ],
-      "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks",
-      "sourceName": "CoinMarketCap",
       "geckoId": "sui",
-      "updatedAt": 1794022325275,
+      "cmcSlug": "sui",
       "lockedAmount": 5860956455.666667,
       "maxSupply": 10000000000,
       "supplyLimit": "capped",
@@ -18583,8 +18665,26 @@
         {
           "symbol": "SUI",
           "time": 1796083200000,
-          "amount": 20597054.33333333,
-          "mechanism": null,
+          "amount": 6902090,
+          "timeKind": "scheduled",
+          "mechanism": "cliff",
+          "allocationComplete": true,
+          "allocations": [
+            {
+              "name": "Early Contributors",
+              "amount": 6902090,
+              "group": "insiders"
+            }
+          ],
+          "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks",
+          "sourceName": "CoinMarketCap"
+        },
+        {
+          "symbol": "SUI",
+          "time": 1796083200000,
+          "amount": 13694964.33333333,
+          "timeKind": "scheduled",
+          "mechanism": "linear",
           "allocationComplete": true,
           "allocations": [
             {
@@ -18601,11 +18701,6 @@
               "name": "Stake Subsidies",
               "amount": 7625597.33333333,
               "group": "other"
-            },
-            {
-              "name": "Early Contributors",
-              "amount": 6902090,
-              "group": "insiders"
             }
           ],
           "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks",
@@ -18613,8 +18708,8 @@
         },
         {
           "symbol": "SUI",
-          "time": 1799280000000,
-          "periodStart": 1798675200000,
+          "time": 1799020800000,
+          "periodStart": 1798416000000,
           "timeKind": "interval-estimate",
           "amount": 20466846.333333373,
           "allocations": [
@@ -18643,41 +18738,11 @@
           "mechanism": null,
           "sourceName": "CoinMarketCap",
           "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks"
-        },
-        {
-          "symbol": "SUI",
-          "time": 1801699200000,
-          "periodStart": 1801094400000,
-          "timeKind": "interval-estimate",
-          "amount": 19490744.666666627,
-          "allocations": [
-            {
-              "name": "Early Contributors",
-              "amount": 6558340,
-              "group": "insiders"
-            },
-            {
-              "name": "Stake Subsidies",
-              "amount": 6863037.666666627,
-              "group": "other"
-            },
-            {
-              "name": "Community Reserves",
-              "amount": 4000000,
-              "group": "other"
-            },
-            {
-              "name": "Mysten Labs Treasury",
-              "amount": 2069367,
-              "group": "other"
-            }
-          ],
-          "allocationComplete": true,
-          "mechanism": null,
-          "sourceName": "CoinMarketCap",
-          "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks"
         }
-      ]
+      ],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/sui/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "SUNUSDT": {
       "symbol": "SUN",
@@ -19313,6 +19378,20 @@
           "sourceUrl": "https://coinmarketcap.com/currencies/trusta-ai/#token-unlocks"
         }
       ]
+    },
+    "THETAUSDT": {
+      "symbol": "THETA",
+      "geckoId": "theta-token",
+      "cmcSlug": "theta-network",
+      "lockedAmount": 0,
+      "maxSupply": 1000000000,
+      "supplyLimit": "capped",
+      "percentageSupply": 1000000000,
+      "percentageBasis": "maxSupply",
+      "events": [],
+      "sourceName": "CoinMarketCap",
+      "sourceUrl": "https://coinmarketcap.com/currencies/theta-network/#token-unlocks",
+      "updatedAt": 1794388943861
     },
     "THEUSDT": {
       "symbol": "THE",

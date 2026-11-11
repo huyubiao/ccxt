@@ -21,6 +21,7 @@ export type HolderSnapshot = {
   sourceUrl: string | null;
   balanceScope?: string;
   amountsEstimated?: boolean;
+  resolutionVersion?: number;
 };
 
 export type HolderConcentration = Omit<HolderSnapshot, "rows"> & {

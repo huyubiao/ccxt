@@ -41,7 +41,7 @@ export default function CoinHolders({ symbol }: { symbol: string }) {
 
   const count = data?.rows.length ?? 0;
   return <section className={styles.holderBlock} aria-label="持币集中度">
-    <h4>持币集中度 · 前 {HOLDER_LIMIT} 地址</h4>
+    <h4>持币集中度 · 前 {count || HOLDER_LIMIT} 地址</h4>
     <p className={styles.fundamentalsNote}>用地址持仓市值除以总市值，计算各地址及其合计占比。两者使用同一币价，相当于用持仓数量除以最大供应量。</p>
     <button className={styles.holderButton} type="button" disabled={loading} onClick={() => setAttempt((value) => value + 1)}>
       {loading ? "正在统计…" : attempt ? "重新读取统计" : "统计前 200 地址"}

@@ -16,6 +16,13 @@ function usd(amount: number | null) {
   return amount == null ? "—" : `${dollars.format(amount)} USD`;
 }
 
+function releaseLabel(event: CoinUnlock) {
+  if (event.timeKind === "interval-estimate") return "区间估算";
+  if (event.mechanism === "cliff") return "集中解锁";
+  if (event.mechanism === "linear") return "线性释放";
+  return "来源排期";
+}
+
 const groups: { id: UnlockAllocation["group"]; title: string }[] = [
   { id: "insiders", title: "团队与投资方" },
   { id: "users", title: "公开销售与用户" },
@@ -60,7 +67,12 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
       <p className={styles.fundamentalsNote}>金额按当前美元价格估算。分组按来源披露的用途，基金会、生态及金库单列在其他类别。
         {unlock.allocations.length > 0 && !allocationComplete && " 部分分配缺少可核实的数量。"}
       </p>
+      {unlock.note && <p className={styles.fundamentalsNote}>{unlock.note}</p>}
       <a className={styles.fundamentalsLink} href={unlock.sourceUrl} target="_blank" rel="noreferrer">{unlock.sourceName} 解锁来源</a>
+      {unlock.sourceChecks?.map((check) => <p className={styles.fundamentalsNote} key={check.sourceName}>
+        {check.agrees ? "数量接近" : "数量有差异"} · {tokens.format(check.amount)} {coin}{" · "}
+        <a className={styles.fundamentalsLink} href={check.sourceUrl} target="_blank" rel="noreferrer">{check.sourceName}</a>
+      </p>)}
     </>
   );
 }
@@ -103,7 +115,7 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
   }
   return <>
     <dl className={styles.metrics}>
-      <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未披露" : `${tokens.format(data.lockedAmount)} ${data.symbol}`}</dd></div>
+      <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未核实" : `${tokens.format(data.lockedAmount)} ${data.symbol}`}</dd></div>
     </dl>
     <div className={styles.tableScroll}>
       <table className={styles.unlockTable}>
@@ -113,7 +125,9 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
           return <tr key={index}>
             <th scope="row">{event ? event.timeKind === "interval-estimate" && event.periodStart != null
               ? <>{time.format(event.periodStart)} 至<small>{time.format(event.time)}（区间估算）</small></>
-              : <time dateTime={new Date(event.time).toISOString()}>{time.format(event.time)}</time> : `第 ${index + 1} 次待补充`}</th>
+              : <><time dateTime={new Date(event.time).toISOString()}>{time.format(event.time)}</time>
+                <small>{releaseLabel(event)}{event.sourceChecks?.some((check) => !check.agrees) && " · 来源有差异"}</small></>
+              : `第 ${index + 1} 次待补充`}</th>
             <td>{event ? tokens.format(event.amount) : "—"}</td>
             <td>{event?.supplyPercentage == null ? "—" : `${event.supplyPercentage.toFixed(4)}%`}</td>
           </tr>;
@@ -122,11 +136,16 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
     </div>
     {data.percentageSupply !== null && <p className={styles.fundamentalsNote}>
       占比按{data.percentageBasis === "maxSupply" ? "供应上限" : "快照总供应量"} {tokens.format(data.percentageSupply)} {data.symbol} 计算。
+      {data.sourceUrl && <>{" "}<a className={styles.fundamentalsLink} href={data.sourceUrl} target="_blank" rel="noreferrer">{data.sourceName} 供应量来源</a></>}
     </p>}
-    {data.events.map((event) => <details key={event.time}>
-      <summary>{time.format(event.time)} {event.timeKind === "interval-estimate" ? "区间释放分配估算" : "解锁分配明细"}</summary>
+    {data.events.map((event) => <details key={`${event.time}:${event.mechanism}:${event.sourceName}:${event.amount}`}>
+      <summary>{time.format(event.time)} · {releaseLabel(event)}明细</summary>
       <Allocation unlock={event} price={price} />
     </details>)}
+    {data.nextCliff && <details>
+      <summary>下一笔集中解锁 · {time.format(data.nextCliff.time)} · {tokens.format(data.nextCliff.amount)} {data.symbol}</summary>
+      <Allocation unlock={data.nextCliff} price={price} />
+    </details>}
     {data.kind === "unknown" && <p className={styles.fundamentalsNote}>发行或锁仓计划尚未核实。</p>}
     {data.events.length < 3 && <p className={styles.fundamentalsNote}>目前来源仅提供 {data.events.length} 次可核实的未来事件，缺少的期次待补充。</p>}
     {data.events.some((event) => event.timeKind === "interval-estimate") && <p className={styles.fundamentalsNote}>

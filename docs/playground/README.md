@@ -57,14 +57,18 @@ and ranked bands with direction, price bounds, distance, estimated liquidation
 notional (`estimatedLiquidationUsdt`), and relative strength. The chart and API
 also report `cumulativeEstimatedLiquidationUsdt`, summing same-side bands from
 the mark to the outside edge of each target band.
-The liquidation model allocates positive net open-interest changes on
-each side across baseline 1x, 2x, 3x, 5x, 10x, and 20x scenarios. Both live
-estimates and replay read the current Binance public small-position bracket
-for the contract's leverage ceiling and maintenance rate. If the ceiling
+The liquidation model allocates initial and newly opened positions on each
+side across baseline 1x, 2x, 3x, 5x, 10x, and 20x scenarios. Both live
+estimates and replay read the current Binance public leverage and margin
+schedule. The first bracket provides the leverage ceiling. If the ceiling
 is above 20x, half of the 20x weight is distributed equally across supported
 50x, 75x, 100x, 125x and ceiling scenarios, including the ceiling once.
 Below 20x, unsupported tiers are merged into the ceiling. The snapshot is
-cached for one hour. If the bracket is unavailable, BTCUSDT falls back to splitting
+cached for one hour. Trigger prices use the maintenance rate and deduction
+for the modeled account notional at the trigger. Representative entry
+notionals are half the first bracket cap above 20x and twice the first cap
+otherwise, limited to 95% of the largest cap permitted at that leverage.
+If the schedule is unavailable, BTCUSDT falls back to splitting
 the 20x allocation into 20x, 50x, 75x, and 100x at 50%, 25%, 15%, and 10%.
 CAKEUSDT splits its 20x allocation into 20x, 50x, and 75x at 75%, 20%, and 5%.
 In those two fallback profiles, scenarios above 20x use the published first-bracket
@@ -92,8 +96,14 @@ splits each leverage allocation among positions adding 0%, 25%, 50%, 100%,
 or 200% of initial margin. The corresponding quantity weights are
 35/25/20/15/5% for longs and 15/20/25/25/15% for shorts. These are uncalibrated
 assumptions about collateral available before liquidation.
-The model uses the five-minute mark close as an entry proxy and increases the
-distance to liquidation by the same proportion as the added initial margin.
+Individual account balances, deposit timing, and fees are outside the inputs.
+At the start of the reconstruction, the model distributes the observed initial
+open interest across entry proxies at the previous completed mark candle's
+low, close, and high (25%, 50%, 25%). It retains only scenarios that could still
+be open at that close. If the preceding mark candle is missing, the model
+starts tracking from subsequent changes. For new positions it uses the
+five-minute mark close as the entry proxy. Additional margin moves the trigger
+farther from entry.
 Nonpositive liquidation prices are excluded from price bands.
 `positionAddScenario` assigns up to 20% of a positive open-interest change
 per side to one-time adds to surviving cohorts. A cohort must have closed at
@@ -102,23 +112,37 @@ the same leverage and fresh initial margin. The model assigns size only where
 the combined liquidation price moves farther from the mark, with a cap of 25%
 of each eligible cohort's surviving size. It deducts allocated size from the
 same-side quantity available for new cohorts. This is an uncalibrated scenario.
-It does not model the time of deposits, the full maintenance margin schedule, cross-account
-equity, or fees. It reduces modeled cohorts
-as open interest falls and removes levels crossed by the mark after formation.
+The model reduces cohorts as open interest falls and removes levels crossed by
+the mark after formation. It estimates additional turnover that leaves net open
+interest unchanged using regular contract candle volume. The per-side bound for
+equal replacement on both sides is the minimum of starting open interest,
+ending open interest, and half the volume remaining after the absolute net
+change. The model replaces 10% of that bound at the candle close. Missing or
+inconsistent volume leaves only the net open-interest update.
 Estimated notional sums modeled position quantity times estimated liquidation
 price within each band. Actual forced fills and trader losses are separate
 metrics. Strength is normalized to the largest surviving band in each snapshot.
-The page refreshes about every 30 seconds. The tables group fine bands into
-wider ranges up to −95% for longs and +1000% for shorts, keeping price order.
+The liquidation estimates refresh about once a minute. The tables group fine
+bands into wider ranges up to −80% for longs and +300% for shorts, keeping price order.
+The collapsible spike list shows the bounds and estimated amounts of qualifying
+0.5% price bands, with longs on the left and shorts on the right. Each side is
+sorted by amount, largest first. A band qualifies when its amount reaches 20% of
+its side's largest band and is at least twice each neighboring mean, computed
+from up to two same-side bands in each direction. Empty neighboring bands count as zero.
 Forecast responses identify their amount basis and validation status as
 `modeled-notional` and `uncalibrated`.
+The `coverage` field reports the latest open-interest quantity and the modeled
+long and short quantities included in the chart. Each side is compared separately
+with the same open-interest quantity. The page leaves coverage unavailable when
+open interest is zero and labels zero table amounts as unavailable from the model.
 For backtesting, retain snapshots with their capture time. An empty list means
 no modeled levels survived, whereas HTTP 502 means inputs were unavailable.
 
 The research panel's 24-hour backtest also has an API at
 `GET /api/markets/liquidations/backtest?symbol=INITUSDT`. It replays closed
 five-minute Binance mark and open-interest bars in order, initializing cohorts
-from up to 24 preceding hours. It freezes the leverage weights at the start
+from up to 72 preceding hours of consecutive data. Live snapshots use the
+same maximum position history. The replay freezes the leverage weights at the start
 of the tested period and counts each modeled cohort only on its first touch.
 The window ends one bar before the latest five-minute boundary to allow open
 interest to publish. Swolecharts and CoinBoss provide historical HTTP data.
@@ -127,23 +151,50 @@ price times filled quantity in USDT. Missing files are reported as partial
 coverage because files may lag or be absent in quiet hours. References are
 filtered to the same Binance perpetual contract and compared separately.
 Archive coverage does not imply coverage of every forced fill on Binance.
-The replay runs the same leverage model as the live price bands. Third-party
-amounts are used only for comparison. Deltas against incomplete references
+The replay runs the same position model as the live price bands. The interval
+comparison reports per-side turnover bounds and estimated replacements in base
+units. It groups the selected source and side by whether the five-minute mark
+high divided by the low minus one reaches 1%, then reports zero-estimate misses
+among intervals with recorded events and signed aggregate amount differences.
+Third-party amounts are used only for comparison. Deltas against incomplete references
 are labeled as sample comparisons and cannot measure full-window error.
-If no modeled price is touched, the API preserves zero for comparison and
-the table displays a no-touch status. A reference with records on that side
-flags a model miss.
+If no modeled price is touched, the API and table display numeric zero.
+A reference with records on that side flags a model miss. With a verified
+exchange margin profile, 20% of unaugmented positions above 20x are modeled
+with one quarter of the original price buffer to represent cross-margin
+accounts with impaired collateral. This redistributes modeled quantity
+without increasing it.
+The API returns 5-minute model and per-provider buckets, with separate
+long/short deltas. The page ranks 5-minute differences for the selected
+direction and source. Missing buckets from a partial source stay unknown.
+When older data is available, the response also reports the result of
+rebuilding with up to 24 hours of warmup while holding model assumptions
+constant.
 
 Token details read supply limits, locked balances, and future releases from
-`lib/coin-unlock-snapshot.json`. The snapshot matches CoinMarketCap token
-details to perpetual contracts using CoinGecko's contract identities.
+`lib/coin-unlock-snapshot.json`. The importer matches sources to perpetual
+contracts using CoinGecko's contract identities. It combines CoinMarketCap
+with reviewed project data, including Binance Research supply figures and
+reviewed public schedules for INIT, ARB, and AGT. Binance's spot unlock calendar republishes
+CoinMarketCap data, so it counts as the same source.
 The API's `tokenomics` field includes up to three future releases, their
 allocation breakdowns and supply percentages, and explicit coverage states.
+If those releases contain no cliff unlock, `nextCliff` exposes the next
+available cliff separately.
 Percentages use maximum supply where available, otherwise the snapshot's
 total supply. Events derived from cumulative vesting curves carry
 `timeKind: "interval-estimate"` and `periodStart`, so consumers can distinguish
 release intervals from dated scheduled events. The research page shows
-the import time and hides expired events. It makes no outbound schedule requests.
+the import time and hides expired events. It reads the bundled snapshot and
+the per-contract files in `.cache/unlocks/` before requesting schedules.
+Missing coverage, expired events, and incomplete allocations trigger a lookup
+for that contract only. Complete records are also rechecked after 24 hours.
+Mixed cliff and linear totals are split only when the provider's allocation
+amounts account for the entire event. A locked amount above its supply basis
+is displayed as unverified.
+Successful and partial results are written atomically. If a source still
+lacks information or is unavailable, the app keeps the saved data and waits
+six hours before trying again. Live market prices use their own cache.
 
 Bitcoin uses the protocol parameters in `lib/coin-issuance-rules.json` and a
 saved Blockstream height to calculate block subsidy, estimated daily issuance,
@@ -154,6 +205,15 @@ unlimited; unknown supply limits remain unknown.
 ETH's separately configured staking rules describe validator issuance and
 base-fee burning, with no fixed halving schedule. Its variable daily issuance,
 burn, and net issuance stay null until a verified daily snapshot is supplied.
+
+Set `DEFILLAMA_API_KEY` (API plan) and/or `TOKENOMIST_API_KEY` (a plan with
+future unlock coverage) to import live cliff unlocks from either provider.
+Each source can fail independently. The importer compares dates by UTC day
+and release type, prefers an amount supported by more providers within 1%,
+and otherwise prefers DefiLlama, then Tokenomist, then CoinMarketCap.
+The event details show the other amounts when comparable. Linear estimates
+and cliff events use different release definitions and are never added
+together. Reviewed public records apply only to the listed tokens.
 
 To refresh the snapshot manually, run `node scripts/refresh-unlock-snapshot.mjs`
 from `docs/playground` with curl available. If your network needs a proxy, set
@@ -175,10 +235,17 @@ verified supply cap still show balances. Results identify the chain and
 contract, since a single-chain address list is not a global holder census.
 Exchange, custody, vesting, burn, and contract addresses remain included.
 Unsupported chains and incomplete rankings are labeled explicitly.
+Contract addresses can come from either verified CoinMarketCap or CoinGecko
+metadata. A supported primary contract is preferred when CoinGecko identifies
+one. An alternate verified chain can provide a single-chain snapshot when the
+preferred source is unavailable. Blockscout also covers Polygon and Gnosis.
 Successful snapshots are cached for six hours in memory and in the ignored
 `.cache/holders/` directory. Native ETH uses Ethereum's address list.
 XRP uses XRPSCAN's nightly list with balances including escrow. TRX uses
 TRONSCAN's top accounts with total balances including staked/unstaking amounts.
+BNB Smart Chain tokens use Binplorer's exact base-unit balances. The public
+endpoint covers up to 100 holders and the panel labels that result as partial.
+Set the server-side `BINPLORER_API_KEY` to a Binplorer personal key to request 200.
 BTC uses CoinLore's free top-100 page, explicitly labeled as partial and
 approximate because the displayed balances are rounded. The BTC snapshot
 uses the same six-hour cache. Other native chains without a verified source
@@ -192,6 +259,15 @@ OKX uses its instrument ID, such as `BTC-USDT-SWAP`. `previous` is the first
 entry in newest-first `history`. `next` is the upcoming estimate. Each
 entry has a decimal `rate` (0.0001 means 0.01%) and millisecond `time`.
 The server shares snapshots by exchange and contract for up to 30 seconds.
+
+Perpetual order-book snapshots are available through
+`GET /api/markets/order-book?exchange=binance&symbol=BTCUSDT`
+or the corresponding OKX instrument ID. Price levels contain a USDT price
+and base-asset quantity, including converted OKX contract quantities.
+The market page refreshes depth about every five seconds, requesting up to
+1,000 levels per side from Binance and 5,000 from OKX. The table shows the
+first 1,000 levels per side in ten groups of 100 with each group's price
+range and quoted notional.
 
 The app refreshes the lists every 15 seconds and also reacts to Binance
 futures `!contractInfo` notifications. Futures and spot show taker buy
