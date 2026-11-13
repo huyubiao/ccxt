@@ -6,7 +6,6 @@ import { HOLDER_LIMIT, type HolderConcentration } from "@/lib/holder-concentrati
 import styles from "./markets.module.css";
 
 const amountFormat = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
-const usdFormat = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", maximumSignificantDigits: 8 });
 const percentageFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 });
 const timeFormat = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 
@@ -53,7 +52,6 @@ export default function CoinHolders({ symbol }: { symbol: string }) {
         <div><dt>已统计地址数</dt><dd>{count} / {HOLDER_LIMIT}</dd></div>
         <div><dt>前 {count} 地址合计持仓</dt><dd>{data.amountsEstimated && "约 "}{data.totalAmount === null ? "—" : amountFormat.format(Number(data.totalAmount))} {data.symbol}</dd></div>
         <div><dt>前 {count} 地址占总市值</dt><dd>{percentage(data.totalMarketCapPercentage, data.amountsEstimated)}</dd></div>
-        <div><dt>总市值（按供应上限）</dt><dd>{data.totalMarketCap === null ? "—" : usdFormat.format(data.totalMarketCap)}</dd></div>
         <div><dt>最大供应量</dt><dd>{data.maxSupply === null ? "—" : `${amountFormat.format(data.maxSupply)} ${data.symbol}`}</dd></div>
       </dl>
       {data.maxSupply === null && <p className={styles.fundamentalsNote}>币种无供应上限或暂未核实上限，因此只展示持仓量。</p>}

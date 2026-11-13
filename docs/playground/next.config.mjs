@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { PHASE_DEVELOPMENT_SERVER } from "next/constants.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,4 +28,7 @@ const nextConfig = {
   env: { NEXT_PUBLIC_BASE_PATH: basePath },
 };
 
-export default nextConfig;
+export default function configureNext(phase) {
+  // A production build must not overwrite the assets served by next dev.
+  return phase === PHASE_DEVELOPMENT_SERVER ? { ...nextConfig, distDir: ".next-dev" } : nextConfig;
+}

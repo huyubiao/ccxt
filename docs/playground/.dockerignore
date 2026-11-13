@@ -1,11 +1,13 @@
 # rebuilt inside the image
 node_modules
 .next
+.next-dev
 runtime
 
 # secrets must never be baked into the image — passed at runtime via env
 .env.local
 .env*.local
+.cache/strategy-notifications/
 
 # misc
 .git

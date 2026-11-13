@@ -178,6 +178,19 @@ export function getLeverageWeighting(
 export type InterestPoint = { time: number; quantity: number };
 export type MarkBar = { time: number; high: number; low: number; close: number; volume?: number };
 
+export function normalizeOpenInterest(rows: { timestamp?: unknown; sumOpenInterest?: unknown }[]): InterestPoint[] {
+  return rows.map((row) => ({ time: Number(row.timestamp), quantity: Number(row.sumOpenInterest) }))
+    .filter(({ time, quantity }) => Number.isSafeInteger(time) && Number.isFinite(quantity) && quantity >= 0)
+    .sort((a, b) => a.time - b.time);
+}
+
+export function latestOpenInterestChange(points: InterestPoint[], asOf: number) {
+  const latest = points.findLast(({ time, quantity }) => time <= asOf && quantity > 0);
+  if (!latest || asOf - latest.time > 2 * LIQUIDATION_INTERVAL_MS) return null;
+  const previous = points.findLast(({ time, quantity }) => time === latest.time - LIQUIDATION_INTERVAL_MS && quantity > 0);
+  return previous ? { time: latest.time, change: (latest.quantity / previous.quantity - 1) * 100 } : null;
+}
+
 export type LiquidationBand = {
   side: Side;
   lowerPrice: number;
@@ -229,8 +242,7 @@ const tableDistanceEdges = {
   short: [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300],
 };
 
-export function groupLiquidationTable(bands: LiquidationBand[], markPrice: number, side: Side) {
-  const edges = tableDistanceEdges[side];
+export function groupLiquidationTable(bands: LiquidationBand[], markPrice: number, side: Side, edges: readonly number[] = tableDistanceEdges[side]) {
   const maximum = edges[edges.length - 1];
   const amounts = edges.slice(1).map(() => 0);
   for (const band of bands) {

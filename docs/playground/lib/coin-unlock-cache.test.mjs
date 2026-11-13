@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rmdir, unlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -58,6 +58,17 @@ test("fetches missing coverage once, then reads complete records from disk after
   assert.equal(calls, 1);
   assert.equal((await restarted(contract, refresh, now + 7 * hour)).tokenomics.events.length, 3);
   assert.equal(calls, 2);
+});
+
+test("retries an old empty cache entry immediately after the source mappings change", async (t) => {
+  const folder = await temporaryFolder(t);
+  await writeFile(path.join(folder, `${contract}.json`), JSON.stringify({ version: 1, attemptedAt: now - 1 }));
+  let calls = 0;
+  const refresh = async () => { calls++; };
+  await createUnlockSnapshotReader(folder)(contract, refresh, now);
+  assert.equal(calls, 1);
+  await createUnlockSnapshotReader(folder)(contract, refresh, now + 1);
+  assert.equal(calls, 1);
 });
 
 test("persists partial results and retries missing allocations after the cooldown", async (t) => {

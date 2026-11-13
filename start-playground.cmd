@@ -40,6 +40,7 @@ if not exist "node_modules\next\dist\bin\next" (
 
 echo Open the market lookup after Next.js is ready: %PLAYGROUND_URL%
 echo Press Ctrl+C in this window to stop the server.
+set "PLAYGROUND_LOCAL_SETTINGS=1"
 "%PLAYGROUND_NODE%" "node_modules\next\dist\bin\next" dev --hostname 127.0.0.1 --port %PLAYGROUND_PORT%
 if errorlevel 1 goto :failed
 popd

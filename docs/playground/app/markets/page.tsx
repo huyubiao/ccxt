@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import MarketMonitor from "./market-monitor";
 import Logo from "@/components/Logo";
 import { apiUrl } from "@/lib/basePath";
+import { readMarketResponse } from "@/lib/market-response";
 import {
-  exchangeLabels, marketExchanges, marketKinds, type MarketExchange, type MarketInstrument,
+  exchangeLabels, getContractCoins, marketExchanges, marketKinds, type MarketExchange, type MarketInstrument,
   type MarketKind, type MarketListing, type MarketQuote, type MarketVolume, type VolumeWindow,
 } from "@/lib/market-lookup";
 import { MINUTE_MS, VOLUME_DELAY_MS } from "@/lib/short-volume";
@@ -55,11 +56,16 @@ export default function MarketsPage() {
   const [exchange, setExchange] = useState<MarketExchange>("binance");
   const [filter, setFilter] = useState("");
   const [selection, setSelection] = useState<string | null>(null);
+  const [showSpikeRecords, setShowSpikeRecords] = useState(false);
+  const futures = binance.directory?.futures;
+  const contracts = futures?.updatedAt != null ? futures.instruments : undefined;
+  const contractCoins = useMemo(() => contracts && getContractCoins(contracts), [contracts]);
+  const coinCount = contractCoins?.size ?? null;
 
   const coins = useMemo(() => {
     const grouped = new Map<string, Coin>();
-    for (const { coin } of binance.directory?.futures.instruments ?? []) {
-      if (!grouped.has(coin)) grouped.set(coin, { symbol: coin, markets: { binance: [], okx: [] } });
+    for (const coin of contractCoins ?? []) {
+      grouped.set(coin, { symbol: coin, markets: { binance: [], okx: [] } });
     }
     for (const [platform, directory] of [
       ["binance", binance.directory], ["okx", okx.directory],
@@ -76,19 +82,31 @@ export default function MarketsPage() {
       return index < 0 ? preferredCoins.length : index;
     };
     return [...grouped.values()].sort((a, b) => rank(a.symbol) - rank(b.symbol) || a.symbol.localeCompare(b.symbol));
-  }, [binance.directory, okx.directory]);
+  }, [contractCoins, binance.directory, okx.directory]);
 
   const coin = coins.find(({ symbol }) => symbol === selection);
   const referenceContract = coin?.markets.binance.filter((pair) => pair.kind === "futures").sort(prioritizePair)[0];
   const search = filter.trim().toUpperCase();
   const visible = coins.filter(({ symbol, markets }) => symbol.includes(search) ||
     markets.binance.some((pair) => pair.kind === "futures" && pair.id.includes(search)));
-  const hasDirectory = binance.directory?.futures.updatedAt != null;
+  const hasDirectory = coinCount !== null;
   const failedPlatforms = marketExchanges.filter((platform) => platforms[platform].syncError ||
     marketKinds.some((kind) => platforms[platform].directory?.[kind].stale));
   const platform = platforms[exchange];
   const activePairs = coin?.markets[exchange] ?? [];
   const kinds = exchange === "binance" ? marketKinds : (["futures", "spot"] as const);
+
+  useEffect(() => {
+    function syncView() { setShowSpikeRecords(window.location.hash === "#spike-records"); }
+    syncView();
+    window.addEventListener("hashchange", syncView);
+    return () => window.removeEventListener("hashchange", syncView);
+  }, []);
+
+  useEffect(() => {
+    const section = document.getElementById(window.location.hash.slice(1));
+    section?.scrollIntoView();
+  }, [showSpikeRecords]);
 
   function selectCoin(item: Coin) {
     setSelection(item.symbol);
@@ -98,25 +116,24 @@ export default function MarketsPage() {
   return (
     <main className={styles.page} lang="zh-CN">
       <header className={styles.header}>
-        <div className={styles.brand}><Logo size={22} /> CCXT</div>
+        <div className={styles.brand}><Logo size={22} /> 星期五</div>
         <nav className={styles.sectionNav} aria-label="页面板块">
           <a href="#market-alerts">交易策略</a>
+          <a href="#spike-records" aria-current={showSpikeRecords ? "page" : undefined}>超阈值记录</a>
           <a href="#coin-research">币种深度调研</a>
         </nav>
       </header>
 
       <div className={styles.content}>
-        <div className={styles.intro}>
+        {!showSpikeRecords && <div className={styles.intro}>
           <p className={styles.eyebrow}>BINANCE · OKX</p>
           <h1>币种行情</h1>
           <p>监控币安合约价格异动，查看币安和 OKX 的币种详情。</p>
-        </div>
+        </div>}
 
-        <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
-          <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
-          <MarketMonitor />
-        </section>
-        <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
+        <MarketMonitor contracts={contracts} coinCount={coinCount}
+          directoryError={binance.syncError || !!futures?.stale} showRecords={showSpikeRecords} />
+        {!showSpikeRecords && <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
           <div className={styles.researchHeading}>
             <h2 id="coin-research-heading" className={styles.sectionTitle}>币种深度调研</h2>
             <p>选择有币安 USDT 本位永续合约的币种，查看市值、代币解锁、最新成交价和成交额。各平台仅显示 USDT 报价交易对。</p>
@@ -124,7 +141,7 @@ export default function MarketsPage() {
           <section className={styles.directory} aria-label="可交易币种">
             <div className={styles.directoryHeader}>
               <h3>可交易币种</h3>
-              {hasDirectory && <span>{visible.length} / {coins.length}</span>}
+              {hasDirectory && <span>共 {coinCount} 个{search && ` · 匹配 ${visible.length} 个`}</span>}
             </div>
             <input
               className={styles.filter}
@@ -188,7 +205,7 @@ export default function MarketsPage() {
               </div>
             )}
           </section>
-        </section>
+        </section>}
       </div>
     </main>
   );
@@ -241,9 +258,8 @@ function PairData({ pair }: { pair: MarketInstrument }) {
           cache: "no-store",
           signal: request.signal,
         });
-        const body = await response.json();
+        const body = await readMarketResponse<MarketQuote>(response, "暂时无法取得行情，请稍后重试。");
         if (request.signal.aborted) return;
-        if (!response.ok) throw new Error(body?.error ?? "无法获取行情。");
         setQuote(body);
         setError(null);
       } catch (error) {

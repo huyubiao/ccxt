@@ -2,7 +2,8 @@ import ccxt from "ccxt";
 import { binanceUsdM, getContractDirectory } from "./binance-usdm";
 import { getExternalQuote, loadExternalPairs } from "./external-markets";
 import {
-  CONTRACT_REFRESH_MS, marketKinds, type MarketDirectory, type MarketInstrument,
+  CONTRACT_REFRESH_MS, getBinanceBundleCandidate, getBinanceBundledAsset, marketKinds,
+  type FuturesContract, type MarketDirectory, type MarketInstrument,
   type MarketExchange, type MarketKind, type MarketListing, type MarketQuote,
 } from "./market-lookup";
 import type { parseAggregateTrade } from "./short-volume";
@@ -43,12 +44,26 @@ type AlphaToken = {
   contractAddress?: string;
 };
 
-// Binance uses a multiplier in the base asset of these contracts.
-const multipliedBases = new Map([
-  ["1000SHIB", "SHIB"], ["1000XEC", "XEC"], ["1000LUNC", "LUNC"],
-  ["1000PEPE", "PEPE"], ["1000FLOKI", "FLOKI"], ["1000BONK", "BONK"],
-  ["1000000MOG", "MOG"],
-]);
+const indexedCoins = new Map<string, { expiresAt: number; pending: Promise<string> }>();
+
+function contractCoin(contract: FuturesContract): string | Promise<string> {
+  const base = contract.base.toUpperCase();
+  if (contract.type !== "PERPETUAL") return base;
+  const known = getBinanceBundledAsset(base);
+  if (known) return known.coin;
+  const underlying = getBinanceBundleCandidate(base);
+  if (!underlying) return base;
+
+  const { id, quote } = contract;
+  const cached = indexedCoins.get(id);
+  if (cached && cached.expiresAt > Date.now()) return cached.pending;
+  const entry = { expiresAt: Date.now() + 30 * 60_000, pending: binanceUsdM.fapiPublicGetConstituents({ symbol: id })
+    .then((index) => index.symbol === id && Array.isArray(index.constituents) && index.constituents.some((row) =>
+      row?.exchange?.toLowerCase() === "binance" && row?.symbol?.toUpperCase() === `${underlying}${quote}`) ? underlying : base)
+    .catch(() => { entry.expiresAt = Date.now() + CONTRACT_REFRESH_MS; return base; }) };
+  indexedCoins.set(id, entry);
+  return entry.pending;
+}
 
 // Alpha can use a different ticker from Binance Spot and Futures for the same token.
 const alphaCoinByAddress = new Map([
@@ -60,9 +75,9 @@ const pepeEthereumAddress = "0x6982508145454ce325ddbe47a25d4ec3d2311933";
 const load: Record<MarketKind, (maxAge: number) => Promise<MarketInstrument[]>> = {
   async futures(maxAge) {
     const { contracts } = await getContractDirectory(maxAge);
-    return contracts.map((contract) => ({
-      ...contract, kind: "futures", coin: multipliedBases.get(contract.base) ?? contract.base.toUpperCase(),
-    }));
+    return Promise.all(contracts.map(async (contract) => ({
+      ...contract, kind: "futures", coin: await contractCoin(contract),
+    })));
   },
   async spot() {
     const response = await binanceSpot.publicGetExchangeInfo({ symbolStatus: "TRADING", showPermissionSets: false });
@@ -133,6 +148,42 @@ export async function getMarketDirectory(exchange: MarketExchange = "binance"): 
   return Object.fromEntries(entries) as MarketDirectory;
 }
 
+export async function getBinanceFuturesInstruments() {
+  return (await getListing("binance", "futures", CONTRACT_REFRESH_MS)).instruments;
+}
+
+export async function getBinanceFuturesMarketCaps(contracts: readonly MarketInstrument[]) {
+  const response = await binanceSpot.fetch("https://www.binance.com/bapi/composite/v1/public/marketing/symbol/list");
+  if (response?.code !== "000000" || response.success === false || !Array.isArray(response.data)) {
+    throw new Error("Binance market cap list unavailable.");
+  }
+  const bySymbol = new Map<string, { base: string; cap: number }>();
+  for (const row of response.data) {
+    const base = row?.baseAsset;
+    const cap = numeric(row?.marketCap);
+    if (typeof base !== "string" || !base || row.quoteAsset !== "USDT" ||
+        row.symbol !== `${base}USDT` || cap === null || cap <= 0) continue;
+    bySymbol.set(row.symbol, { base, cap });
+  }
+
+  const caps = new Map<string, number>();
+  for (const pair of contracts) {
+    if (pair.type !== "PERPETUAL" || pair.quote !== "USDT") continue;
+    const exact = bySymbol.get(pair.id);
+    if (exact?.base === pair.base) {
+      caps.set(pair.id, exact.cap);
+      continue;
+    }
+    const bundle = getBinanceBundledAsset(pair.base);
+    // Some bundles share a ticker with an unrelated unbundled asset.
+    if (bundle && bundle.coin === bundle.symbol) {
+      const underlying = bySymbol.get(`${bundle.symbol}USDT`);
+      if (underlying) caps.set(pair.id, underlying.cap);
+    }
+  }
+  return caps;
+}
+
 export async function getMarketInstrument(kind: MarketKind, symbol: string, exchange: MarketExchange = "binance") {
   const listing = await getListing(exchange, kind, CONTRACT_REFRESH_MS).catch((error) => {
     const last = snapshots.get(`${exchange}:${kind}`);
@@ -142,10 +193,9 @@ export async function getMarketInstrument(kind: MarketKind, symbol: string, exch
   return listing.instruments.find(({ id }) => id === symbol);
 }
 
-export async function findOkxPerpetual(pair: MarketInstrument) {
+export async function findOkxPerpetuals(pair: MarketInstrument) {
   const listing = await getListing("okx", "futures", CONTRACT_REFRESH_MS);
-  const matches = listing.instruments.filter(({ coin, quote }) => coin === pair.coin && quote === pair.quote);
-  return matches.length === 1 ? matches[0] : undefined;
+  return listing.instruments.filter(({ coin, quote }) => coin === pair.coin && quote === pair.quote);
 }
 
 type KlineParams = { interval: string; startTime: number; endTime: number; limit: number };

@@ -3,6 +3,7 @@ node_modules/
 
 # next.js
 .next/
+.next-dev/
 out/
 next-env.d.ts
 *.tsbuildinfo
@@ -20,3 +21,4 @@ runtime/
 .cache/holders/
 .cache/unlocks/
 .cache/liquidations/
+.cache/strategy-notifications/

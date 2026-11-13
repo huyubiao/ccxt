@@ -383,10 +383,7 @@ export default function CoinLiquidations({ symbol }: { symbol: string }) {
               ? ` 流通市值中位数约 ${amount.format(data.leverageWeighting.capitalization.medianUsd)} 美元（${data.leverageWeighting.capitalization.windowDays} 天，${data.leverageWeighting.capitalization.samples} 个日样本，${data.leverageWeighting.capitalization.source === "coingecko" ? "CoinGecko" : "币安持仓与 CMC 流通量估算"}）。`
               : " 市值历史不足时，BTC 和 ETH 使用稳定档，其他合约使用极度高风险档作为备用。"}
           </p>
-          {data.leverageWeighting.turnover && <p>
-            24 小时合约成交额 {amount.format(data.leverageWeighting.turnover.volumeUsdt)} USDT · 最新流通市值 {amount.format(data.leverageWeighting.turnover.marketCapUsd)} 美元
-            （{data.leverageWeighting.turnover.marketCapSource === "binance-cmc-proxy" ? "币安标记价与 CMC 流通量估算" : data.leverageWeighting.turnover.marketCapSource}）。
-          </p>}
+          {data.leverageWeighting.turnover && <p>24 小时合约成交额 {amount.format(data.leverageWeighting.turnover.volumeUsdt)} USDT</p>}
           <p>
             {data.leverageWeighting.turnover
               ? `成交额 / 流通市值 ${weightPercent.format(data.leverageWeighting.turnover.ratio)} · ${data.leverageWeighting.turnover.band.label} 档 · 活跃度系数 ${weightPercent.format(data.leverageWeighting.turnover.band.factor)}`

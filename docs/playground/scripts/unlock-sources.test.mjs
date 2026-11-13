@@ -63,6 +63,39 @@ test("imports cliff and linear amounts separately when the provider supplies a c
   assert.equal(token.events[0].allocations[0].group, "insiders");
 });
 
+test("loads Lombard unlocks using the CoinGecko ID for BARDUSDT and the CoinMarketCap slug", async () => {
+  const unlockTime = Date.parse("2026-11-18T00:00:00Z");
+  const { token, refreshed } = await fetchUnlockSnapshot({ geckoId: "lombard-protocol", base: "BARD" }, {
+    now: Date.parse("2026-11-13T00:00:00Z"),
+    request: async (url) => {
+      const { pathname, searchParams } = new URL(url);
+      if (!pathname.endsWith("/cryptocurrency/detail")) return {};
+      if (searchParams.get("slug") !== "lombard") return { status: { error_code: 400 } };
+      return { status: { error_code: 0 }, data: {
+        id: 38408, slug: "lombard", symbol: "BARD", statistics: { maxSupply: 1_000_000_000 },
+        tokenUnlockLatest: {
+          tokenLockedAmount: 614895833.3333333,
+          nextUnlocked: { date: unlockTime, tokenAmount: 23854166.66666667 },
+          nextUnlockedDetail: [
+            { allocationName: "Core Contributors", tokenAmount: 6944444.44444444, vestingType: "linear" },
+            { allocationName: "Early Investors", tokenAmount: 5555555.55555556, vestingType: "linear" },
+            { allocationName: "Community & Ecosystem", tokenAmount: 6979166.66666667, vestingType: "linear" },
+            { allocationName: "Liquid Bitcoin Foundation", tokenAmount: 4375000, vestingType: "linear" },
+          ],
+        },
+      } };
+    },
+  });
+  assert.equal(refreshed, true);
+  assert.equal(token.geckoId, "lombard-protocol");
+  assert.equal(token.maxSupply, 1_000_000_000);
+  assert.equal(token.events[0].time, unlockTime);
+  assert.equal(token.events[0].amount, 23854166.66666667);
+  assert.equal(token.events[0].mechanism, "linear");
+  assert.equal(token.events[0].allocationComplete, true);
+  assert.equal(token.events[0].sourceUrl, "https://coinmarketcap.com/currencies/lombard/#token-unlocks");
+});
+
 test("reviewed schedule records retain disagreement and do not require a hard cap", () => {
   const [agt] = reviewedToken({ geckoId: "alaya-ai", base: "AGT" }).events;
   assert.equal(agt.mechanism, null);

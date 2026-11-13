@@ -90,8 +90,10 @@ export function getTokenomics(contract: string, now = Date.now(), row = contract
 
 const retryInterval = 6 * 60 * 60 * 1000;
 const freshnessInterval = 24 * 60 * 60 * 1000;
+// Retry legacy incomplete lookups once with the corrected source mappings.
+const cacheVersion = 2;
 
-type CachedUnlock = { version: 1; attemptedAt: number; row?: StoredToken };
+type CachedUnlock = { version: 1 | typeof cacheVersion; attemptedAt: number; row?: StoredToken };
 type RefreshUnlock = (prior: StoredToken | undefined, now: number) => Promise<StoredToken | undefined>;
 type UnlockResult = { tokenomics: Tokenomics; geckoId?: string };
 
@@ -120,7 +122,7 @@ export function createUnlockSnapshotReader(folder: string) {
       if (!cached) {
         try {
           const saved = JSON.parse(await readFile(file, "utf8")) as CachedUnlock;
-          if (saved?.version === 1 && Number.isFinite(saved.attemptedAt) &&
+          if ((saved?.version === 1 || saved?.version === cacheVersion) && Number.isFinite(saved.attemptedAt) &&
               (saved.row === undefined || (typeof saved.row?.symbol === "string" && Array.isArray(saved.row.events) &&
                 saved.row.events.every((event) => Number.isFinite(event?.time) && Array.isArray(event.allocations))))) {
             cached = saved;
@@ -132,13 +134,14 @@ export function createUnlockSnapshotReader(folder: string) {
       }
       const prior = cached?.row ?? seed;
       const saved = getTokenomics(contract, now, prior);
-      if ((complete(saved) && now - saved.updatedAt < freshnessInterval) || (cached && now - cached.attemptedAt < retryInterval)) {
+      if ((complete(saved) && now - saved.updatedAt < freshnessInterval) ||
+          (cached?.version === cacheVersion && now - cached.attemptedAt < retryInterval)) {
         return { tokenomics: saved, geckoId: prior?.geckoId };
       }
 
       const fresh = await refresh(prior, now).catch(() => undefined);
       const row = fresh ?? cached?.row;
-      const entry: CachedUnlock = { version: 1, attemptedAt: now, row };
+      const entry: CachedUnlock = { version: cacheVersion, attemptedAt: now, row };
       const temporary = `${file}.${randomUUID()}.tmp`;
       try {
         await mkdir(folder, { recursive: true });

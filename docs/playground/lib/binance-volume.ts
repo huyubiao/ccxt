@@ -2,6 +2,7 @@ import ccxt from "ccxt";
 import { binanceSpot, getAggregateTrades, getKlines } from "./binance-markets";
 import { getExternalRecentTrades, getExternalTurnoverCandles, getOkxContractTurnover } from "./external-markets";
 import type { MarketInstrument, MarketVolume, VolumeWindow } from "./market-lookup";
+import { getTurnoverBaseline, TURNOVER_BASELINE_MINUTES, type AlertTurnover } from "./price-alerts";
 import {
   MINUTE_MS as MINUTE, VOLUME_DELAY_MS, parseAggregateTrade, shortPeriods, sumShortVolume,
   type RecentTrade, type RecentVolumeSeed,
@@ -106,6 +107,21 @@ export async function getAlertTurnover(contract: MarketInstrument, start: number
   const { total } = sumWindow([middle], firstMinute, contract.onboardAt, true);
   if (total == null) return null;
   return total + [...head, ...tail].reduce((amount, trade) => amount + trade.amount, 0);
+}
+
+export async function getAlertTurnoverComparison(contract: MarketInstrument, end: number, seconds: number): Promise<AlertTurnover> {
+  const start = end - seconds * 1000;
+  const baselineEnd = Math.floor(start / MINUTE) * MINUTE;
+  const baselineStart = baselineEnd - TURNOVER_BASELINE_MINUTES * MINUTE;
+  const [turnover, baseline] = await Promise.all([
+    getAlertTurnover(contract, start, end).catch(() => null),
+    baselineStart < contract.onboardAt ? null : fetchBlock(contract, baselineStart, baselineEnd, MINUTE)
+      .then(({ volumes }) => getTurnoverBaseline(
+        Array.from({ length: TURNOVER_BASELINE_MINUTES }, (_, index) => volumes.get(baselineStart + index * MINUTE)?.total),
+        seconds,
+      )).catch(() => null),
+  ]);
+  return { turnover, baseline };
 }
 
 export async function getRecentVolumeRates(asset: string, end = Date.now()): Promise<[number, number][] | null> {

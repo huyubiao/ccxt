@@ -204,8 +204,8 @@ export default function CoinFundamentals({ symbol }: { symbol: string }) {
             </p>}
             {market && <a className={styles.fundamentalsLink} href={market.sourceUrl} target="_blank" rel="noreferrer">{market.sourceName} 市值来源</a>}
             {(error || data?.marketError) && <p className={styles.fundamentalsNote} role="status">市值同步失败，稍后重试。</p>}
-            {data && !market && !data.marketError && <p className={styles.fundamentalsNote}>
-              {data.status === "unmapped" ? "暂无可核实的币种市值资料。" : "暂无市值数据。"}
+            {data && market?.circulatingMarketCap == null && !data.marketError && <p className={styles.fundamentalsNote}>
+              {data.status === "unmapped" ? "暂无可核实的币种市值资料。" : "暂无可核实的流通市值。"}
             </p>}
           </div>
           <div>

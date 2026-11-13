@@ -34,6 +34,10 @@ the server is ready, open <http://127.0.0.1:3000/>. From a terminal, pass a
 different port as the first argument if needed, for example
 `start-playground.cmd 3001`.
 
+In development, source changes are applied by Fast Refresh. Development
+uses `.next-dev` and production builds use `.next`, so running a production
+build does not overwrite assets served by the development server.
+
 ```bash
 cd docs/playground
 npm install
@@ -49,8 +53,39 @@ applies to Binance Alpha. Markets with multiple pairs offer a pair selector.
 Alpha pairs are grouped by coin symbol and include their Binance ID and,
 when available, their chain and token address to distinguish same-name tokens.
 
-The spike monitor stores desktop notification preferences separately from
-price monitoring. Research shows Binance liquidation pressure bands, also
+The price movement monitor stores its DingTalk notification preference separately
+from price monitoring. The monitor watches the full live Binance USDT perpetual
+directory shared with coin research. Both sections count each coin once,
+including when a coin has several contracts.
+
+The contract market-cap API starts with one bulk request to the Binance website's market
+catalog and matches its circulating market caps to the USDⓈ-M contract
+directory. For missing assets it shares the overview's CoinGecko and
+CoinMarketCap sources, matching CoinMarketCap batch quotes by slug and
+symbol. It then checks remaining assets in batches of individual requests.
+Partial results refresh sooner to continue coverage.
+If neither source provides a usable market cap, compatible contracts can
+use an estimate from Binance's open-interest snapshot and circulating supply.
+The token overview displays current circulating and maximum-supply market
+caps once per asset.
+
+Each confirmed alert starts with a low-confidence momentum forecast using the
+trigger price and direction. Its move is 20% of the alert's absolute move,
+bounded to 0.05%–3%. With sufficient directional evidence and a fresh price,
+a forecast based on recent taker trades, near-midpoint depth, and estimated
+liquidation pressure replaces it. Open interest change and holder
+concentration scale the estimated move. An unusually large aggregate fill
+is a proxy for aggressive buying or selling.
+
+The forecast fixes the baseline at publication and settles on the first
+one-minute candle close at least five minutes later. The table compares the
+estimated move with the realized move and reports direction hits and mean
+absolute error in percentage points over settled forecasts in the latest
+100 alert samples. Records stay in the browser and due forecasts can settle
+after reopening the page. Older records with only the alert move display a
+retrospective estimate without a settlement score.
+
+Research shows Binance liquidation pressure bands, also
 available via `GET /api/markets/liquidations?symbol=JCTUSDT`. The response
 includes the model version, mark price, snapshot and open-interest timestamps,
 and ranked bands with direction, price bounds, distance, estimated liquidation
@@ -177,6 +212,10 @@ contracts using CoinGecko's contract identities. It combines CoinMarketCap
 with reviewed project data, including Binance Research supply figures and
 reviewed public schedules for INIT, ARB, and AGT. Binance's spot unlock calendar republishes
 CoinMarketCap data, so it counts as the same source.
+Verified mappings in `lib/coin-source-aliases.json` link CoinGecko IDs to their
+CoinMarketCap slugs when they differ, such as `lombard-protocol` and `lombard`
+for BARD. After updating the mappings, existing incomplete cache entries are
+eligible for a fresh lookup immediately.
 The API's `tokenomics` field includes up to three future releases, their
 allocation breakdowns and supply percentages, and explicit coverage states.
 If those releases contain no cliff unlock, `nextCliff` exposes the next
@@ -283,27 +322,63 @@ windows fill in as the live stream covers each full window. Confirmed candle
 totals are available while directional data is missing.
 
 Use the price monitor embedded in the market page to watch all listed Binance
-USDT perpetual contracts. Its settings and alert history are grouped in the
-collapsible spike-monitor panel, expanded by default. Collapsing the panel
-keeps enabled monitoring running. Monitoring starts off by default. Enable it with
-the switch in the panel. Turning it off closes the price stream and stops
-monitor requests while keeping the alerts already shown on the page.
-Set the window in seconds (1 to 3600, default 60)
+USDT perpetual contracts. Inside the strategy panel, **告警记录** and **涨跌预测**
+can be expanded or collapsed independently. The **超阈值记录** navigation opens
+the price-trigger history while monitoring continues. Monitoring starts off by default.
+Turning it off closes the price stream and cancels pending checks.
+Set the window in whole seconds (1 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
-Each direction maintains its own rolling samples and post-alert baseline.
-Changing and saving alert settings restarts sampling. Existing signed
+Both thresholds have a minimum magnitude of 1%. Downward thresholds must
+be below 100%. Previously saved settings below 1% or above 300 seconds are
+adjusted to the new bounds when the page loads.
+Each direction maintains its own rolling samples and alert levels.
+Changing the price thresholds or window restarts sampling. Existing signed
 threshold settings migrate to the corresponding direction.
 The monitor samples the latest received price once per second. A rule
 triggers when its signed percentage threshold is reached or exceeded.
-After an alert, its trigger price becomes the reference for the same duration.
-At the end of that duration, the monitor resumes the rolling window of
-post-alert prices. A new alert starts a new reference period.
-Alerts appear in the open page and optionally as browser notifications.
-The browser saves the switch, window, and threshold locally. The monitor
+Levels compound from the threshold price rather than the traded price.
+For example, a 5% upward rule starting at 100 has levels at 105, 110.25,
+and 115.7625. A sample can reach several levels and reports the highest one.
+Each level reached starts a fresh window for the next level. If the window
+expires, the monitor returns to looking for the start of a new series.
+
+Price triggers appear in **超阈值记录**. The first trigger in each series
+enters the turnover check queue. The configured window's Binance USDT
+turnover must reach the configured multiple (default 3×) of the baseline
+before any alert in that series is issued. Later levels share that check.
+If the price advances while the check is pending, the highest level reached
+is reported when the check passes. The baseline
+is the median quote turnover of 60 complete one-minute candles before the
+window starts, scaled to its duration. The latest 100 price triggers and
+their check results stay in the browser. Data gaps or interrupted checks
+remain visible in the history. Confirmed alerts appear in the strategy panel
+and can also be sent to a DingTalk group robot.
+
+On Windows, launch with `start-playground.cmd` and open **交易策略 → 钉钉推送**
+on the local market page. Paste the group robot Webhook and, if signing is
+enabled, its signing secret. Click **保存并启用**, then **发送测试消息** to check
+delivery. On the local settings page, enter up to 500 characters of custom text
+or leave the test message field blank to send the default. Then click
+**异动监控 → 开启钉钉通知** to send confirmed alerts
+from the monitor. This switch is off by default and is saved in the browser;
+**停止钉钉通知** stops sending while alerts continue to appear on the page.
+Use **暂停推送** or **恢复推送** for the server-wide robot setting. Keep the
+market page open for live monitoring. Existing `DINGTALK_WEBHOOK_URL` and
+`DINGTALK_WEBHOOK_SECRET` values act as a fallback until a robot is saved on
+the local page. To enable editing when starting the server manually, set `PLAYGROUND_LOCAL_SETTINGS=1`
+and bind Next.js to `127.0.0.1`.
+Server-side strategies can call `strategyNotifier.send({ title, lines })` from
+`lib/strategy-notifications.ts`. Browser strategies add a typed event and a
+server-side template in `lib/strategy-notification-events.ts`.
+
+The browser saves the switch, window, price thresholds, and turnover multiple locally. The monitor
 starts a new price window after reconnecting, re-enabling, or changing the duration.
-Alerts include the configured window's USDT turnover and the latest available
-five-minute account and top-trader position ratios at the trigger time, shown
-separately for Binance and the matching OKX USDT perpetual contract.
+Alerts include the level and the latest available five-minute long/short
+ratios at the trigger time. The first trigger records the checked USDT
+turnover. Both venues show the
+all-account ratio. Binance shows the top-trader position ratio, and OKX shows
+the top-trader account ratio for the matching USDT perpetual. OKX cells show
+the reason when a contract or its statistics are unavailable.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets

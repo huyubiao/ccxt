@@ -2,7 +2,7 @@ import ccxt from "ccxt";
 import { binanceUsdM } from "./binance-usdm";
 import { okxTrade } from "./external-trades";
 import type { MarketExchange, MarketInstrument, MarketKind, MarketQuote, VolumeWindow } from "./market-lookup";
-import type { AlertRatio } from "./price-alerts";
+import { readOkxAlertRatio, type OkxAlertRatio } from "./price-alerts";
 import type { RecentTrade } from "./short-volume";
 
 type ExternalExchange = Exclude<MarketExchange, "binance">;
@@ -90,24 +90,19 @@ function number(value: string | number | undefined): number | null {
 
 export async function getOkxAlertRatios(instId: string, time: number) {
   const params = { instId, period: "5m", end: time + 1, limit: 2 };
-  async function read(path: string): Promise<AlertRatio | null> {
-    const rows = await okx<[string, string]>(`rubik/stat/contracts/${path}`, params);
-    let latest: AlertRatio | null = null;
-    for (const [timestamp, value] of rows) {
-      const ts = number(timestamp);
-      const ratio = number(value);
-      if (ts === null || ts <= 0 || ts > time || ratio === null || ratio < 0 ||
-          (latest !== null && ts <= latest.time)) continue;
-      const short = 1 / (1 + ratio);
-      latest = { time: ts, ratio, long: 1 - short, short };
+  async function read(path: string): Promise<OkxAlertRatio> {
+    try {
+      const rows = await okx<unknown>(`rubik/stat/contracts/${path}`, params);
+      return readOkxAlertRatio(rows, time);
+    } catch (error) {
+      return { status: error instanceof ccxt.RateLimitExceeded ? "rate-limited" : "request-failed" };
     }
-    return latest;
   }
-  const [okxAccounts, okxPositions] = await Promise.all([
-    read("long-short-account-ratio-contract").catch(() => null),
-    read("long-short-position-ratio-contract-top-trader").catch(() => null),
+  const [okxAccounts, okxTopAccounts] = await Promise.all([
+    read("long-short-account-ratio-contract"),
+    read("long-short-account-ratio-contract-top-trader"),
   ]);
-  return { okxAccounts, okxPositions };
+  return { okxAccounts, okxTopAccounts };
 }
 
 function change(last: number | null, open: number | null) {

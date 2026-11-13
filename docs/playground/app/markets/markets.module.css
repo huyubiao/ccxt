@@ -16,6 +16,7 @@
 .sectionNav { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-left: auto; font-size: 13px; }
 .sectionNav a { color: hsl(var(--brand)); }
 .sectionNav a:hover { text-decoration: underline; }
+.sectionNav a[aria-current="page"] { font-weight: 600; text-decoration: underline; }
 .sectionTitle { margin: 0; font-size: 20px; }
 .monitorPanel, .workspace { scroll-margin-top: 16px; }
 .monitorPanel > h2 { margin-bottom: 12px; }
@@ -32,10 +33,21 @@
 .alertScroll { max-height: 360px; overflow-y: auto; }
 .alertTable thead { position: sticky; top: 0; background: hsl(var(--card)); }
 .alertTable small { display: block; color: hsl(var(--muted-foreground)); }
+.spikeRecords { padding: 16px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
+.spikeRecords p { margin: 0 0 12px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+.spikeRecords p:last-child { margin-bottom: 0; }
+.spikeRecords table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.spikeRecords th, .spikeRecords td { padding: 10px; border-bottom: 1px solid hsl(var(--border)); text-align: left; white-space: nowrap; }
+.forecastTable { min-width: 880px; }
+.forecastIndicators summary, .forecastNotes summary { cursor: pointer; }
+.forecastIndicators dl { margin: 8px 0 0; min-width: 230px; white-space: normal; }
+.forecastIndicators dt { color: hsl(var(--muted-foreground)); font-size: 12px; }
+.forecastIndicators dd { margin: 0 0 6px; }
+.forecastNotes { margin-top: 12px; font-size: 13px; }
 .monitorSettings { padding: 16px; }
 .monitorSettings p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .monitorForm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.monitorForm input, .monitorForm button {
+.monitorForm input, .monitorForm textarea, .monitorForm button {
   padding: 7px 10px;
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
@@ -48,6 +60,18 @@
 .monitorForm input:disabled { opacity: .5; }
 .monitorForm button { cursor: pointer; }
 .monitorForm button:hover { border-color: hsl(var(--brand)); }
+.monitorForm button:disabled { opacity: .55; cursor: default; }
+.notificationSettings { margin-bottom: 12px; }
+.notificationSettings h3 { margin: 0; font-size: 16px; }
+.notificationSettings span { color: hsl(var(--muted-foreground)); font-size: 13px; }
+.notificationForm { display: grid; grid-template-columns: max-content minmax(0, 1fr); max-width: 580px; margin-top: 12px; }
+.notificationForm input { width: 100%; min-width: 0; box-sizing: border-box; }
+.notificationForm > div { grid-column: 1 / -1; }
+.notificationTestForm { display: grid; justify-items: start; max-width: 580px; margin-top: 12px; }
+.notificationTestForm textarea { box-sizing: border-box; width: 100%; resize: vertical; }
+.monitorHelp { display: grid; gap: 4px; margin-top: 12px; }
+.monitorHelp p { margin: 0; }
+.monitorHelp strong { color: hsl(var(--foreground)); }
 .content { max-width: 1540px; margin: auto; padding: clamp(28px, 4vw, 56px) 20px; }
 .intro { margin-bottom: 26px; }
 .eyebrow { margin: 0; font: 600 12px var(--mono); letter-spacing: .12em; color: hsl(var(--brand)); }
@@ -198,6 +222,9 @@
 .turnover { margin-top: 16px; border-top: 1px solid hsl(var(--border)); padding-top: 12px; }
 .turnover h4 { margin: 0 0 8px; font-size: 14px; }
 .turnover h4 span { margin-left: 5px; color: hsl(var(--muted-foreground)); font: 12px var(--mono); }
+.monitorSectionSummary { cursor: pointer; padding: 4px 0; }
+.monitorSectionSummary h4 { display: inline; }
+.monitorSectionSummary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 .turnover p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .tableScroll { overflow-x: auto; }
 .liquidationGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 16px; }

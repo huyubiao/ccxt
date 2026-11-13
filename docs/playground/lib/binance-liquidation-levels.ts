@@ -1,8 +1,8 @@
-import { binanceUsdM } from "./binance-usdm";
+import { binanceUsdM, canUseContractSupply, readContractSupplyValuation } from "./binance-usdm";
 import { getCirculatingMarketCap, getDailyMarketCaps } from "./coin-fundamentals";
 import {
   estimateLiquidationLevels, LIQUIDATION_INTERVAL_MS, LIQUIDATION_LOOKBACK_MS, LIQUIDATION_POSITION_HISTORY_MS, LIQUIDATION_REFRESH_MS,
-  MARKET_CAP_DAY_MS, MARKET_CAP_WINDOWS, replayLiquidations, selectMarketCapHistory,
+  MARKET_CAP_DAY_MS, MARKET_CAP_WINDOWS, latestOpenInterestChange, normalizeOpenInterest, replayLiquidations, selectMarketCapHistory,
   type MarginProfile,
   type LiquidationLevels, type MarketCapHistory, type TurnoverInput,
 } from "./liquidation-levels";
@@ -78,11 +78,6 @@ export function getBinanceLiquidationLevels(instrument: MarketInstrument): Promi
   return result;
 }
 
-function canUseCapProxy(instrument: MarketInstrument) {
-  // CMC supply is in tokens, whereas the price for a bundled contract is per bundle.
-  return instrument.base === instrument.coin && !/^\d{3,}/.test(instrument.base);
-}
-
 function getMarketCapHistory(instrument: MarketInstrument, asOf?: number) {
   if (instrument.type === "TRADIFI_PERPETUAL") return Promise.resolve(null);
   const { id: symbol } = instrument;
@@ -100,12 +95,12 @@ function getMarketCapHistory(instrument: MarketInstrument, asOf?: number) {
     const series = historical?.length ? historical : (await Promise.all(fallbacks.map((days) =>
       getDailyMarketCaps(instrument, days + extraDays).catch(() => [])))).flat();
     const cap = selectMarketCapHistory(series, "coingecko", referenceTime, instrument.onboardAt);
-    if ((cap && cap.windowDays >= 30) || !canUseCapProxy(instrument)) return cap;
+    if ((cap && cap.windowDays >= 30) || !canUseContractSupply(instrument)) return cap;
     const rows = await binanceUsdM.fapiDataGetOpenInterestHist({ symbol, period: "1d", limit: 30, endTime: referenceTime }).catch(() => []);
     // OI value divided by OI quantity gives the implied per-unit price at each snapshot.
     const proxy: [number, number][] = rows.map((row) => [
       Number(row.timestamp),
-      Number(row.sumOpenInterestValue) / Number(row.sumOpenInterest) * Number(row.CMCCirculatingSupply),
+      readContractSupplyValuation(row)?.marketCap ?? NaN,
     ]);
     const fallback = selectMarketCapHistory(proxy, "binance-cmc-proxy", referenceTime, instrument.onboardAt);
     return fallback && fallback.samples > (cap?.samples ?? 0) ? fallback : cap;
@@ -123,10 +118,21 @@ type InterestRows = Awaited<ReturnType<typeof binanceUsdM.fapiDataGetOpenInteres
 type MarkRows = Awaited<ReturnType<typeof binanceUsdM.fapiPublicGetMarkPriceKlines>>;
 type TradeRows = Awaited<ReturnType<typeof binanceUsdM.fapiPublicGetKlines>>;
 
-function interestPoints(rows: InterestRows) {
-  return rows.map((row) => ({ time: Number(row.timestamp), quantity: Number(row.sumOpenInterest) }))
-    .filter(({ time, quantity }) => Number.isSafeInteger(time) && Number.isFinite(quantity) && quantity >= 0)
-    .sort((a, b) => a.time - b.time);
+const recentInterest = new Map<string, { expires: number; result: Promise<InterestRows> }>();
+
+function getRecentInterestRows(symbol: string): Promise<InterestRows> {
+  const cached = recentInterest.get(symbol);
+  if (cached && cached.expires > Date.now()) return cached.result;
+  const result = binanceUsdM.fapiDataGetOpenInterestHist({ symbol, period: "5m", limit: 289 }).catch((error) => {
+    if (recentInterest.get(symbol)?.result === result) recentInterest.delete(symbol);
+    throw error;
+  });
+  recentInterest.set(symbol, { expires: Date.now() + 15_000, result });
+  return result;
+}
+
+export async function getBinanceOpenInterestChange(symbol: string, asOf: number) {
+  return latestOpenInterestChange(normalizeOpenInterest(await getRecentInterestRows(symbol)), asOf);
 }
 
 function markBarsFrom(rows: MarkRows, trades: TradeRows) {
@@ -165,7 +171,7 @@ async function loadOlderHistory(instrument: MarketInstrument, before: number) {
     binanceUsdM.fapiPublicGetKlines({ symbol: instrument.id, interval: "5m", limit: 600,
       startTime: start, endTime: before - 1 }).catch(() => []),
   ]);
-  const pointsByTime = new Map(interestPoints(interest.flat()).map((point) => [point.time, point]));
+  const pointsByTime = new Map(normalizeOpenInterest(interest.flat()).map((point) => [point.time, point]));
   const barsByTime = new Map(markBarsFrom(mark, trades).map((bar) => [bar.time, bar]));
   const points = [], bars = [];
   // Only extend the replay through consecutive intervals ending at the known boundary.
@@ -202,10 +208,10 @@ export async function getBinanceLiquidationReplay(instrument: MarketInstrument, 
   const marketCapUsd = startSupply * (priorClose ?? NaN);
   const beforeTrades = trades.filter((row) => Number(row[0]) < from);
   const volumeUsdt = beforeTrades.reduce((sum, row) => sum + Number(row[7]), 0);
-  const turnover = canUseCapProxy(instrument) && instrument.type !== "TRADIFI_PERPETUAL" &&
+  const turnover = canUseContractSupply(instrument) &&
     beforeTrades.length === LIQUIDATION_LOOKBACK_MS / step && Number.isFinite(volumeUsdt) && volumeUsdt >= 0 &&
     Number.isFinite(marketCapUsd) && marketCapUsd > 0 ? { volumeUsdt, marketCapUsd, marketCapSource: "binance-cmc-proxy" } : null;
-  const recentPoints = interestPoints([...before, ...during]);
+  const recentPoints = normalizeOpenInterest([...before, ...during]);
   const warmup = older.points[0]?.time ?? historicalStart;
   const replayBars = older.points.length ? bars.filter((bar) => bar.time >= historicalStart) : bars;
   const result = replayLiquidations(symbol, [...older.points, ...recentPoints],
@@ -222,7 +228,7 @@ export async function getBinanceLiquidationReplay(instrument: MarketInstrument, 
 async function loadLevels(instrument: MarketInstrument) {
   const { id: symbol } = instrument;
   const [interest, bars, response, capitalization, market, quoteResponse, marginProfile, trades] = await Promise.all([
-    binanceUsdM.fapiDataGetOpenInterestHist({ symbol, period: "5m", limit: 289 }),
+    getRecentInterestRows(symbol),
     binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", limit: 290 }),
     binanceUsdM.fapiPublicGetPremiumIndex({ symbol }),
     getMarketCapHistory(instrument),
@@ -240,7 +246,7 @@ async function loadLevels(instrument: MarketInstrument) {
     asOf < Date.now() - 120_000 || asOf > Date.now() + 10_000) {
     throw new Error("Binance liquidation model inputs are unavailable.");
   }
-  const points = interestPoints(interest);
+  const points = normalizeOpenInterest(interest);
   const markBars = markBarsFrom(bars, trades);
   const older = points.length ? await olderHistory(instrument, points[0].time) : { points: [], bars: [] };
   const quote = Array.isArray(quoteResponse) ? null : quoteResponse;
@@ -250,7 +256,7 @@ async function loadLevels(instrument: MarketInstrument) {
   if (Number.isFinite(quoteVolume) && quoteVolume >= 0 && closeTime >= asOf - 300_000 && closeTime <= asOf + 60_000) {
     if (market?.circulatingMarketCap && market.updatedAt && Math.abs(asOf - market.updatedAt) <= MARKET_CAP_DAY_MS) {
       turnover = { volumeUsdt: quoteVolume, marketCapUsd: market.circulatingMarketCap, marketCapSource: market.sourceName };
-    } else if (instrument.type !== "TRADIFI_PERPETUAL" && canUseCapProxy(instrument)) {
+    } else if (canUseContractSupply(instrument)) {
       const supplyRow = interest.findLast((row) => Number(row.timestamp) <= asOf &&
         Number(row.timestamp) >= asOf - 900_000 && Number(row.CMCCirculatingSupply) > 0);
       const marketCapUsd = Number(supplyRow?.CMCCirculatingSupply) * markPrice;

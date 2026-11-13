@@ -37,6 +37,41 @@ export type MarketInstrument = FuturesContract & {
   address?: string;
 };
 
+// Keep Binance's grouping keys for assets whose spot or Alpha ticker also includes the bundle.
+const bundledAssets = new Map<string, { coin: string; symbol: string; geckoId: string }>([
+  ["1000SHIB", { coin: "SHIB", symbol: "SHIB", geckoId: "shiba-inu" }],
+  ["1000XEC", { coin: "XEC", symbol: "XEC", geckoId: "ecash" }],
+  ["1000LUNC", { coin: "LUNC", symbol: "LUNC", geckoId: "terra-luna" }],
+  ["1000PEPE", { coin: "PEPE", symbol: "PEPE", geckoId: "pepe" }],
+  ["1000FLOKI", { coin: "FLOKI", symbol: "FLOKI", geckoId: "floki" }],
+  ["1000BONK", { coin: "BONK", symbol: "BONK", geckoId: "bonk" }],
+  ["1000000MOG", { coin: "MOG", symbol: "MOG", geckoId: "mog-coin" }],
+  ["1000CAT", { coin: "1000CAT", symbol: "CAT", geckoId: "simons-cat" }],
+  ["1000CHEEMS", { coin: "1000CHEEMS", symbol: "CHEEMS", geckoId: "cheems-token" }],
+  ["1000SATS", { coin: "1000SATS", symbol: "SATS", geckoId: "sats-ordinals" }],
+  ["1000RATS", { coin: "1000RATS", symbol: "RATS", geckoId: "rats" }],
+  ["1MBABYDOGE", { coin: "1MBABYDOGE", symbol: "BABYDOGE", geckoId: "baby-doge-coin" }],
+]);
+
+export function getBinanceBundledAsset(base: string) {
+  return bundledAssets.get(base.toUpperCase());
+}
+
+export function getBinanceBundleCandidate(base: string) {
+  return /^(?:10{3,}|[1-9]\d*[KM])([A-Z][A-Z0-9]*)$/.exec(base.toUpperCase())?.[1];
+}
+
+export function getContractCoins(
+  contracts: readonly Pick<MarketInstrument, "id" | "coin">[],
+  symbols?: { has(symbol: string): boolean },
+): Set<string> {
+  const coins = new Set<string>();
+  for (const { id, coin } of contracts) {
+    if (!symbols || symbols.has(id)) coins.add(coin);
+  }
+  return coins;
+}
+
 export type MarketListing = {
   instruments: MarketInstrument[];
   updatedAt: number | null;
