@@ -1,6 +1,6 @@
 import { formatMarketAmount, marketNumberFormatter } from "@/lib/market-number";
 import {
-  compareForecast, estimateAlertMove, forecastAccuracy, getRecordForecast, largeTradeSide,
+  compareForecast, forecastAccuracy, largeTradeSide,
   type ForecastIndicators, type ForecastRecord,
 } from "@/lib/spike-forecast";
 import styles from "./markets.module.css";
@@ -51,19 +51,15 @@ export default function SpikeForecastPanel({ records }: { records: ForecastRecor
         </tr></thead>
         <tbody>{records.map((record) => {
           const { symbol, time: alertedAt, analysis, outcome } = record;
-          const forecast = getRecordForecast(record);
-          const change = forecast?.change ?? estimateAlertMove(record.change);
-          const fallbackReason = analysis === undefined ? "正在采集指标" : analysis === null ? "综合行情暂不可用" : "综合信号或基准价不足";
+          const forecast = analysis?.forecast;
+          const forecastStatus = analysis === undefined ? "正在采集指标" : analysis === null ? "综合行情暂不可用" : "综合信号或基准价不足";
           const compared = forecast && outcome ? compareForecast(forecast, outcome) : null;
           return <tr key={`${symbol}:${alertedAt}`}>
             <th scope="row">{symbol}<small>{time.format(alertedAt)}</small></th>
-            <td>{change === null ? "告警涨跌幅无效" : <>
-              <span className={change > 0 ? styles.buy : styles.sell}>{signal(change)}</span>
-              {forecast ? <>
-                {!analysis?.forecast && <small>按告警时的涨跌初步估计 · {fallbackReason}</small>}
-                <small>基准 {price(forecast.price)} USDT · {time.format(forecast.issuedAt)}</small>
-              </> : <small>历史告警估算 · 缺少当时基准价</small>}
-            </>}</td>
+            <td>{forecast ? <>
+              <span className={forecast.change > 0 ? styles.buy : styles.sell}>{signal(forecast.change)}</span>
+              <small>基准 {price(forecast.price)} USDT · {time.format(forecast.issuedAt)}</small>
+            </> : forecastStatus}</td>
             <td>{forecast ? time.format(forecast.settlesAt) : "—"}</td>
             <td>{compared && outcome ? <>{signal(compared.actual)}<small>收盘 {price(outcome.price)} USDT</small></>
               : forecast ? outcome === null ? "缺少核对时的收盘价" : "待核对" : "—"}</td>
@@ -76,7 +72,7 @@ export default function SpikeForecastPanel({ records }: { records: ForecastRecor
     </div>}
     <details className={styles.forecastNotes}>
       <summary>怎么看预测结果？</summary>
-      <p><strong>预测什么？</strong> 告警后估计接下来约 5 分钟会涨还是跌、幅度有多大。系统先根据告警时的涨跌做初步估计，拿到足够的成交、挂单等数据后再更新。</p>
+      <p><strong>预测什么？</strong> 告警后，系统结合主动成交、挂单等指标估计接下来约 5 分钟的涨跌方向和幅度。信号不足或行情暂不可用时，预测列会显示对应状态。</p>
       <p><strong>怎么核对？</strong> 从预测时的价格算起，满 5 分钟后，取到达的第一个整分钟的收盘价来算实际涨跌。比如 10:02:20 给出预测，就用 10:08 的收盘价核对。</p>
       <p><strong>怎么算准不准？</strong> 比如预测涨 2%，实际涨 1%，方向算对，幅度差 1 个百分点。如果实际下跌或持平，方向算错。方向准确率和平均幅度差都只统计已经核对过的预测。</p>
     </details>

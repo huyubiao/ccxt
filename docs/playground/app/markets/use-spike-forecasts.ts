@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
 import {
-  FORECAST_HISTORY_LIMIT, FORECAST_VERSION, MAX_FORECAST_AGE_MS, forecastAlertMove, getRecordForecast,
+  FORECAST_HISTORY_LIMIT, FORECAST_VERSION, MAX_FORECAST_AGE_MS,
   type ForecastAnalysis, type ForecastOutcome, type ForecastRecord,
 } from "@/lib/spike-forecast";
 
@@ -37,7 +37,7 @@ export function useSpikeForecasts() {
   const lifecycle = useRef<AbortController | null>(null);
   const running = useRef(new Map<string, "analysis" | "outcome">());
   const nextRetry = useRef(new Map<string, number>());
-  const hasPending = records.some((row) => row.analysis === undefined || (!!getRecordForecast(row) && row.outcome === undefined));
+  const hasPending = records.some((row) => row.analysis === undefined || (row.analysis?.forecast && row.outcome === undefined));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -99,7 +99,7 @@ export function useSpikeForecasts() {
         continue;
       }
 
-      const forecast = getRecordForecast(row);
+      const forecast = row.analysis?.forecast;
       if (!forecast || row.outcome !== undefined || outcomeSlots <= 0 || now < forecast.settlesAt + 2000 ||
           now < (retries.get(key) ?? 0)) continue;
       outcomeSlots--;
@@ -120,11 +120,11 @@ export function useSpikeForecasts() {
     }
   }, [records, ready, clock]);
 
-  const addAlerts = useCallback((batch: (Pick<ForecastRecord, "symbol" | "time" | "change"> & { price: number })[]) => {
+  const addAlerts = useCallback((batch: Pick<ForecastRecord, "symbol" | "time" | "change">[]) => {
     setRecords((previous) => {
       const unique = new Map<string, ForecastRecord>();
-      for (const { symbol, time, change, price } of batch) {
-        const candidate = { symbol, time, change, fallback: forecastAlertMove(change, price, time) };
+      for (const { symbol, time, change } of batch) {
+        const candidate = { symbol, time, change };
         const key = keyOf(candidate);
         if (Math.abs(change) > Math.abs(unique.get(key)?.change ?? 0)) unique.set(key, candidate);
       }

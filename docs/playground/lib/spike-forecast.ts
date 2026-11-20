@@ -21,28 +21,13 @@ export type SpikeForecast = { issuedAt: number; settlesAt: number; price: number
 export type ForecastAnalysis = { indicators: ForecastIndicators; forecast: SpikeForecast | null };
 export type ForecastOutcome = { price: number; time: number };
 export type ForecastRecord = {
-  symbol: string; time: number; change: number; fallback?: SpikeForecast;
+  symbol: string; time: number; change: number;
   analysis?: ForecastAnalysis | null; outcome?: ForecastOutcome | null;
 };
-
-export function estimateAlertMove(spikeChange: number): number | null {
-  if (!Number.isFinite(spikeChange) || spikeChange <= -100 || spikeChange === 0) return null;
-  return Math.sign(spikeChange) * Math.min(3, Math.max(0.05, Math.abs(spikeChange) * 0.2));
-}
 
 function forecastAt(price: number, issuedAt: number, change: number): SpikeForecast {
   const settlesAt = Math.ceil((issuedAt + HORIZON_MS) / MINUTE) * MINUTE;
   return { issuedAt, settlesAt, price, change };
-}
-
-export function forecastAlertMove(spikeChange: number, price: number, time: number): SpikeForecast | undefined {
-  const change = estimateAlertMove(spikeChange);
-  if (change === null || !Number.isFinite(price) || price <= 0) return undefined;
-  return forecastAt(price, time, change);
-}
-
-export function getRecordForecast({ analysis, fallback }: ForecastRecord) {
-  return analysis?.forecast ?? fallback;
 }
 
 export function summarizeTradePressure(trades: RecentTrade[], amounts: TradeAmounts): TradePressure | null {
@@ -103,7 +88,7 @@ export function compareForecast(forecast: SpikeForecast, outcome: ForecastOutcom
 export function forecastAccuracy(records: ForecastRecord[]) {
   let samples = 0, hits = 0, totalError = 0;
   for (const record of records) {
-    const forecast = getRecordForecast(record);
+    const forecast = record.analysis?.forecast;
     if (!forecast || !record.outcome) continue;
     const comparison = compareForecast(forecast, record.outcome);
     samples++;

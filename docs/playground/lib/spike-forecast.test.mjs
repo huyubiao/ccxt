@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  compareForecast, estimateAlertMove, forecastAccuracy, forecastAlertMove, forecastSpike, getRecordForecast, largeTradeSide, readForecastClose,
+  compareForecast, forecastAccuracy, forecastSpike, largeTradeSide, readForecastClose,
   summarizeTradePressure,
 } from "./spike-forecast.ts";
 import { groupLiquidationTable, latestOpenInterestChange, normalizeOpenInterest } from "./liquidation-levels.ts";
@@ -88,22 +88,11 @@ test("settles against the exact closed candle and scores only comparable outcome
   assert(Math.abs(stats.mae - 7 / 3) < 1e-9);
 });
 
-test("alert momentum produces a settleable fallback even when indicators or their request fail", () => {
-  const fallback = forecastAlertMove(-5, 100, issuedAt);
-  assert.deepEqual(fallback, { change: -1, price: 100, issuedAt, settlesAt: 960_000 });
-  assert.equal(forecastAlertMove(5, 100, issuedAt).change, 1);
-  assert.equal(estimateAlertMove(30), 3);
-  assert.equal(estimateAlertMove(-0.01), -0.05);
-  assert.equal(estimateAlertMove(0), null);
-  assert.equal(forecastAlertMove(-5, 0, issuedAt), undefined);
-  const record = { symbol: "TESTUSDT", time: issuedAt, change: -5, fallback };
-  assert.equal(getRecordForecast(record), fallback);
-  assert.equal(getRecordForecast({ ...record, analysis: null }), fallback);
-  assert.equal(getRecordForecast({ ...record, analysis: { indicators: empty, forecast: null } }), fallback);
-  const forecast = forecastSpike({ ...empty, flow, interest }, -5, 102, issuedAt + 1000);
-  assert.equal(getRecordForecast({ ...record, analysis: { indicators: empty, forecast } }), forecast);
-  const outcome = { price: 99, time: fallback.settlesAt - 1 };
-  const stats = forecastAccuracy([{ ...record, outcome }, { ...record, fallback: undefined, outcome }]);
-  assert.deepEqual([stats.hits, stats.samples], [1, 1]);
-  assert(stats.mae < 1e-9);
+test("excludes legacy momentum estimates from accuracy statistics", () => {
+  const fallback = { change: -1, price: 100, issuedAt, settlesAt: 960_000 };
+  const record = { symbol: "TESTUSDT", time: issuedAt, change: -5, fallback,
+    outcome: { price: 99, time: fallback.settlesAt - 1 } };
+  const stats = forecastAccuracy([record, { ...record, analysis: null },
+    { ...record, analysis: { indicators: empty, forecast: null } }]);
+  assert.deepEqual(stats, { hits: 0, samples: 0, mae: null });
 });

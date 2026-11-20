@@ -69,11 +69,9 @@ use an estimate from Binance's open-interest snapshot and circulating supply.
 The token overview displays current circulating and maximum-supply market
 caps once per asset.
 
-Each confirmed alert starts with a low-confidence momentum forecast using the
-trigger price and direction. Its move is 20% of the alert's absolute move,
-bounded to 0.05%–3%. With sufficient directional evidence and a fresh price,
-a forecast based on recent taker trades, near-midpoint depth, and estimated
-liquidation pressure replaces it. Open interest change and holder
+After a confirmed alert, the monitor uses recent taker trades, near-midpoint
+depth, and estimated liquidation pressure to forecast the move when there is
+sufficient directional evidence and a fresh price. Open interest change and holder
 concentration scale the estimated move. An unusually large aggregate fill
 is a proxy for aggressive buying or selling.
 
@@ -82,8 +80,8 @@ one-minute candle close at least five minutes later. The table compares the
 estimated move with the realized move and reports direction hits and mean
 absolute error in percentage points over settled forecasts in the latest
 100 alert samples. Records stay in the browser and due forecasts can settle
-after reopening the page. Older records with only the alert move display a
-retrospective estimate without a settlement score.
+after reopening the page. Alerts without a forecast show their data status
+and are excluded from settlement and accuracy statistics.
 
 Research shows the Binance long/short liquidation risk chart. The snapshot
 API at GET /api/markets/liquidations?symbol=JCTUSDT returns price bands and
