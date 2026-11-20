@@ -4,12 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import MarketMonitor from "./market-monitor";
 import Logo from "@/components/Logo";
 import { apiUrl } from "@/lib/basePath";
+import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import { readMarketResponse } from "@/lib/market-response";
 import {
   exchangeLabels, getContractCoins, marketExchanges, marketKinds, type MarketExchange, type MarketInstrument,
   type MarketKind, type MarketListing, type MarketQuote, type MarketVolume, type VolumeWindow,
 } from "@/lib/market-lookup";
 import { MINUTE_MS, VOLUME_DELAY_MS } from "@/lib/short-volume";
+import { VOLUME_BASELINE_DAYS } from "@/lib/volume-multiple";
 import { useMarketDirectory } from "./use-market-directory";
 import { useLiveVolume } from "./use-live-volume";
 import CoinFundamentals from "./coin-fundamentals";
@@ -18,8 +20,7 @@ import CoinLiquidations from "./coin-liquidations";
 import { CoinOrderBook } from "./coin-order-book";
 import styles from "./markets.module.css";
 
-const numberFormat = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
-const turnoverFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const formatNumber = marketNumberFormatter({ maximumSignificantDigits: 12 });
 const percentFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, signDisplay: "exceptZero" });
 const timeFormat = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 
@@ -28,10 +29,6 @@ const contractTypes: Record<string, string> = {
   PERPETUAL: "永续", TRADIFI_PERPETUAL: "传统金融永续",
 };
 const preferredCoins = ["BTC", "ETH", "BNB", "SOL"];
-
-function formatNumber(value: number | null) {
-  return value === null ? "—" : numberFormat.format(value);
-}
 
 function pairLabel(pair: MarketInstrument) {
   const label = `${pair.base}/${pair.quote}`;
@@ -351,6 +348,9 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
   return (
     <section className={styles.turnover} aria-label={turnoverLabel}>
       <h4>{turnoverLabel} <span>USDT</span></h4>
+      {kind === "futures" && <p title={`最近一个完整 UTC 日的成交额 ÷ 此前最多 ${VOLUME_BASELINE_DAYS} 个完整交易日的日均成交额`}>
+        放量倍数 <strong>{history?.volumeMultiple == null ? "—" : `${history.volumeMultiple.toFixed(2)} 倍`}</strong>
+      </p>}
       <div className={styles.tableScroll}>
         <table>
           <thead><tr>
@@ -368,11 +368,10 @@ function TradeVolume({ pair }: { pair: MarketInstrument }) {
                   {useClosedMinute && period === "1m" ? "上一根已收盘 1 分钟 K 线" : periodLabels[period]}
                   {asOf != null && <small>截至 {timeFormat.format(asOf)}</small>}
                 </th>
-                {totalOnly ? <td>{total != null ? turnoverFormat.format(total) : "—"}</td> : <>
-                  <td className={styles.buy}>{amounts ? turnoverFormat.format(amounts.buy) : "—"}</td>
-                  <td className={styles.sell}>{amounts ? turnoverFormat.format(amounts.sell) : "—"}</td>
-                  {external && <td>{total != null ? turnoverFormat.format(total) :
-                    amounts ? turnoverFormat.format(amounts.buy + amounts.sell) : "—"}</td>}
+                {totalOnly ? <td>{formatMarketAmount(total)}</td> : <>
+                  <td className={styles.buy}>{formatMarketAmount(amounts?.buy)}</td>
+                  <td className={styles.sell}>{formatMarketAmount(amounts?.sell)}</td>
+                  {external && <td>{formatMarketAmount(total ?? (amounts ? amounts.buy + amounts.sell : null))}</td>}
                 </>}
               </tr>
             ))}
@@ -403,7 +402,7 @@ function Quote({ pair, quote }: { pair: MarketInstrument; quote: MarketQuote }) 
     <>
       <dl className={styles.last}>
         <dt>最新成交价（{pair.quote}）</dt>
-        <dd>{formatNumber(quote.last)}</dd>
+        <dd title={quote.last === null ? undefined : fullMarketNumber.format(quote.last)}>{formatNumber(quote.last)}</dd>
       </dl>
       <dl className={styles.metrics}>
         {metrics.map(({ label, value }) => (

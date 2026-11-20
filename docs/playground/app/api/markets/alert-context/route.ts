@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { binanceUsdM } from "@/lib/binance-usdm";
-import { findOkxPerpetuals, getMarketInstrument } from "@/lib/binance-markets";
+import { getMarketInstrument } from "@/lib/binance-markets";
 import { getAlertTurnover, getAlertTurnoverComparison } from "@/lib/binance-volume";
-import { getOkxAlertRatios } from "@/lib/external-markets";
-import type { MarketInstrument } from "@/lib/market-lookup";
-import { parseAlertSeconds, type AlertMarketContext, type AlertRatio, type OkxAlertRatio } from "@/lib/price-alerts";
+import { parseAlertSeconds, type AlertMarketContext, type AlertRatio } from "@/lib/price-alerts";
 import { VOLUME_DELAY_MS } from "@/lib/short-volume";
 
 export const runtime = "nodejs";
@@ -25,15 +23,6 @@ function readRatio(rows: RatioRow[], end: number, longKey: string, shortKey: str
   const long = number(row[longKey] ?? row.longAccount);
   const short = number(row[shortKey] ?? row.shortAccount);
   return ratio === null || long === null || short === null ? null : { ratio, long, short, time: row.timestamp };
-}
-
-async function readOkxRatios(contract: MarketInstrument, time: number) {
-  const matches = await findOkxPerpetuals(contract).catch(() => null);
-  if (matches?.length === 1) return getOkxAlertRatios(matches[0].id, time);
-  const result: OkxAlertRatio = {
-    status: matches === null ? "directory-unavailable" : matches.length ? "ambiguous-contract" : "no-contract",
-  };
-  return { okxAccounts: result, okxTopAccounts: result };
 }
 
 export async function GET(request: NextRequest) {
@@ -59,15 +48,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
     }
     const query = { symbol, period: "5m", limit: 2, endTime: time };
-    const [turnover, binanceAccounts, binancePositions, okx] = await Promise.all([
+    const [turnover, binanceAccounts, binancePositions] = await Promise.all([
       view === "ratios" ? null : getAlertTurnover(contract, time - seconds * 1000, time + 1).catch(() => null),
       binanceUsdM.fapiDataGetGlobalLongShortAccountRatio(query)
         .then((rows) => readRatio(rows, time, "longAccount", "shortAccount")).catch(() => null),
       binanceUsdM.fapiDataGetTopLongShortPositionRatio(query)
         .then((rows) => readRatio(rows, time, "longPosition", "shortPosition")).catch(() => null),
-      readOkxRatios(contract, time),
     ]);
-    const context: AlertMarketContext = { turnover, binanceAccounts, binancePositions, ...okx };
+    const context: AlertMarketContext = { turnover, binanceAccounts, binancePositions };
     return NextResponse.json(context, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ error: "暂时无法取得告警行情。" }, { status: 502 });

@@ -11,7 +11,7 @@
 #   - the `playground` app is on an INTERNAL network only → it has NO direct route
 #     to the internet or to the host's other services.
 #   - all outbound HTTP(S) is forced through `egress-proxy` (squid), which permits
-#     ONLY the exchange API domains generated from CCXT (see proxy/). Even if user
+#     CCXT exchange API domains and the HTTPS liquidation sources (see proxy/). Even if user
 #     code ignores the proxy env and opens a raw socket, there is no route out.
 # The OpenRouter key is injected as env (never baked into the image).
 

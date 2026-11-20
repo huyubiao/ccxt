@@ -1,67 +1,16 @@
 import { binanceUsdM, canUseContractSupply, readContractSupplyValuation } from "./binance-usdm";
-import { getCirculatingMarketCap, getDailyMarketCaps } from "./coin-fundamentals";
+import { BINANCE_MARGIN_BRACKETS_URL, createBinanceMarginProfileLoader } from "./binance-margin-brackets";
+import { getDailyMarketCaps } from "./coin-fundamentals";
 import {
-  estimateLiquidationLevels, LIQUIDATION_INTERVAL_MS, LIQUIDATION_LOOKBACK_MS, LIQUIDATION_POSITION_HISTORY_MS, LIQUIDATION_REFRESH_MS,
-  MARKET_CAP_DAY_MS, MARKET_CAP_WINDOWS, latestOpenInterestChange, normalizeOpenInterest, replayLiquidations, selectMarketCapHistory,
-  type MarginProfile,
-  type LiquidationLevels, type MarketCapHistory, type TurnoverInput,
+  BINANCE_POSITION_CALIBRATION, estimateLiquidationLevels, LIQUIDATION_INTERVAL_MS, LIQUIDATION_LOOKBACK_MS,
+  LIQUIDATION_POSITION_HISTORY_MS, LIQUIDATION_REFRESH_MS,
+  MARKET_CAP_DAY_MS, MARKET_CAP_WINDOWS, LiquidationHistoryIncompleteError, latestOpenInterestChange, normalizeOpenInterest,
+  replayLiquidationsAsync, requireLiquidationHistory, selectMarketCapHistory,
+  type LiquidationLevels, type MarketCapHistory,
 } from "./liquidation-levels";
-
-type BinanceMarginTable = {
-  success?: boolean;
-  data?: { brackets?: { symbol: string; riskBrackets?: {
-    bracketNotionalFloor: number;
-    bracketNotionalCap: number;
-    bracketMaintenanceMarginRate: number;
-    cumFastMaintenanceAmount: number;
-    maxOpenPosLeverage: number;
-  }[] }[] };
-};
-
-let marginSnapshot: { profiles: Map<string, MarginProfile>; expires: number } | undefined;
-let marginPending: Promise<Map<string, MarginProfile>> | undefined;
-
-async function getMarginProfile(symbol: string) {
-  if (!marginSnapshot || marginSnapshot.expires <= Date.now()) {
-    marginPending ??= (async () => {
-      const response = await fetch("https://www.binance.com/bapi/futures/v1/friendly/future/common/brackets", {
-        cache: "no-store", signal: AbortSignal.timeout(6_000),
-      });
-      if (!response.ok) throw new Error("Binance margin table unavailable.");
-      const body: BinanceMarginTable = await response.json();
-      if (!body.success || !Array.isArray(body.data?.brackets)) throw new Error("Invalid Binance margin table.");
-      const profiles = new Map<string, MarginProfile>();
-      for (const row of body.data.brackets) {
-        const first = row.riskBrackets?.find((bracket) => bracket.bracketNotionalFloor === 0);
-        if (!first) continue;
-        const { maxOpenPosLeverage: maxLeverage, bracketMaintenanceMarginRate: maintenanceRate,
-          bracketNotionalCap: notionalCap } = first;
-        if (Number.isSafeInteger(maxLeverage) && maxLeverage >= 1 && Number.isFinite(notionalCap) && notionalCap > 0 &&
-          Number.isFinite(maintenanceRate) && maintenanceRate >= 0 && maintenanceRate < 1 / maxLeverage) {
-          const brackets = (row.riskBrackets ?? []).map((bracket) => ({
-            floor: bracket.bracketNotionalFloor, cap: bracket.bracketNotionalCap, rate: bracket.bracketMaintenanceMarginRate,
-            deduction: bracket.cumFastMaintenanceAmount, maxLeverage: bracket.maxOpenPosLeverage,
-          })).sort((a, b) => a.floor - b.floor);
-          const complete = brackets.every((bracket, index) => Object.values(bracket).every(Number.isFinite) &&
-            bracket.floor === (brackets[index - 1]?.cap ?? 0) && bracket.cap > bracket.floor &&
-            bracket.rate >= 0 && bracket.rate < 1 && bracket.deduction >= 0 && bracket.maxLeverage >= 1);
-          profiles.set(row.symbol, { maxLeverage, maintenanceRate, notionalCap, brackets: complete ? brackets : undefined });
-        }
-      }
-      if (!profiles.size) throw new Error("Binance margin table is empty.");
-      marginSnapshot = { profiles, expires: Date.now() + 60 * 60_000 };
-      return profiles;
-    })().catch(() => {
-      const profiles = marginSnapshot?.profiles ?? new Map<string, MarginProfile>();
-      marginSnapshot = { profiles, expires: Date.now() + 60_000 };
-      return profiles;
-    }).finally(() => { marginPending = undefined; });
-    return (await marginPending).get(symbol) ?? null;
-  }
-  return marginSnapshot.profiles.get(symbol) ?? null;
-}
 import type { MarketInstrument } from "./market-lookup";
 
+const getMarginProfile = createBinanceMarginProfileLoader(() => binanceUsdM.fetch(BINANCE_MARGIN_BRACKETS_URL));
 const cache = new Map<string, { expires: number; result: Promise<LiquidationLevels> }>();
 const capCache = new Map<string, { expires: number; result: Promise<MarketCapHistory | null> }>();
 
@@ -118,6 +67,18 @@ type InterestRows = Awaited<ReturnType<typeof binanceUsdM.fapiDataGetOpenInteres
 type MarkRows = Awaited<ReturnType<typeof binanceUsdM.fapiPublicGetMarkPriceKlines>>;
 type TradeRows = Awaited<ReturnType<typeof binanceUsdM.fapiPublicGetKlines>>;
 
+// Use half-open ranges so no 5-minute timestamp is skipped or fetched twice at page boundaries.
+async function historyPages<Row>(from: number, to: number, pageSize: number,
+  fetchPage: (params: { startTime: number; endTime: number; limit: number }) => Promise<Row[]>) {
+  const step = LIQUIDATION_INTERVAL_MS;
+  const requests: Promise<Row[]>[] = [];
+  for (let startTime = from; startTime < to; startTime += pageSize * step) {
+    const end = Math.min(to, startTime + pageSize * step);
+    requests.push(fetchPage({ startTime, endTime: end - 1, limit: (end - startTime) / step }));
+  }
+  return (await Promise.all(requests)).flat();
+}
+
 const recentInterest = new Map<string, { expires: number; result: Promise<InterestRows> }>();
 
 function getRecentInterestRows(symbol: string): Promise<InterestRows> {
@@ -136,106 +97,113 @@ export async function getBinanceOpenInterestChange(symbol: string, asOf: number)
 }
 
 function markBarsFrom(rows: MarkRows, trades: TradeRows) {
-  const volumeByTime = new Map(trades.filter(Array.isArray).map((row) => [Number(row[0]), Number(row[5])]));
+  const volumeByTime = new Map(trades.filter(Array.isArray).map((row) => {
+    const volume = row[5] == null || String(row[5]).trim() === "" ? NaN : Number(row[5]);
+    const price = Number(row[7]) / volume;
+    const turnoverPrice = volume > 0 && Number.isFinite(price) && price > 0 ? price : undefined;
+    return [Number(row[0]), { volume, turnoverPrice }];
+  }));
   return rows.filter(Array.isArray)
-    .map(([time, , high, low, close]) => ({ time: Number(time), high: Number(high), low: Number(low), close: Number(close),
-      volume: volumeByTime.get(Number(time)) }))
-    .filter(({ time, high, low, close }) => Number.isSafeInteger(time) &&
-      [high, low, close].every(Number.isFinite) && low > 0 && low <= close && close <= high);
+    .map(([time, open, high, low, close]) => ({ time: Number(time), open: Number(open), high: Number(high), low: Number(low), close: Number(close),
+      ...volumeByTime.get(Number(time)) }))
+    .filter(({ time, open, high, low, close }) => Number.isSafeInteger(time) &&
+      [open, high, low, close].every(Number.isFinite) && low > 0 &&
+      low <= open && open <= high && low <= close && close <= high);
 }
 
-const olderHistoryCache = new Map<string, { before: number; expires: number; result: ReturnType<typeof loadOlderHistory> }>();
+export async function getBinanceClosedMarkBars(symbol: string) {
+  const step = LIQUIDATION_INTERVAL_MS;
+  const boundary = Math.floor(Date.now() / step) * step;
+  const rows = await binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", limit: 49, endTime: boundary - 1 });
+  return markBarsFrom(rows, []).filter(({ time }) => time % step === 0 && time + step <= boundary);
+}
 
-function olderHistory(instrument: MarketInstrument, before: number) {
+const olderHistoryCache = new Map<string, { start: number; before: number; expires: number; result: ReturnType<typeof loadOlderHistory> }>();
+
+function olderHistory(instrument: MarketInstrument, start: number, before: number) {
   const key = instrument.id;
   const cached = olderHistoryCache.get(key);
-  if (cached?.before === before && cached.expires > Date.now()) return cached.result;
-  const result = loadOlderHistory(instrument, before);
-  olderHistoryCache.set(key, { before, expires: Date.now() + LIQUIDATION_INTERVAL_MS, result });
+  if (cached?.start === start && cached.before === before && cached.expires > Date.now()) return cached.result;
+  const result = loadOlderHistory(instrument, start, before).catch((error) => {
+    if (olderHistoryCache.get(key)?.result === result) olderHistoryCache.delete(key);
+    throw error;
+  });
+  olderHistoryCache.set(key, { start, before, expires: Date.now() + LIQUIDATION_INTERVAL_MS, result });
   return result;
 }
 
-async function loadOlderHistory(instrument: MarketInstrument, before: number) {
+async function loadOlderHistory(instrument: MarketInstrument, from: number, before: number) {
   const step = LIQUIDATION_INTERVAL_MS;
-  const start = Math.max(before - (LIQUIDATION_POSITION_HISTORY_MS - LIQUIDATION_LOOKBACK_MS),
-    Math.ceil(instrument.onboardAt / step) * step);
+  const listingStart = Math.ceil(instrument.onboardAt / step) * step;
+  const start = Math.max(from, listingStart);
   if (start >= before) return { points: [], bars: [] };
-  const requests: Promise<InterestRows>[] = [];
-  for (let time = start; time < before; time += LIQUIDATION_LOOKBACK_MS) {
-    requests.push(binanceUsdM.fapiDataGetOpenInterestHist({ symbol: instrument.id, period: "5m", limit: 288,
-      startTime: time, endTime: Math.min(before, time + LIQUIDATION_LOOKBACK_MS) - 1 }).catch(() => []));
-  }
-  const [interest, mark, trades] = await Promise.all([Promise.all(requests),
-    binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol: instrument.id, interval: "5m", limit: 600,
-      startTime: start - step, endTime: before - 1 }).catch(() => []),
-    binanceUsdM.fapiPublicGetKlines({ symbol: instrument.id, interval: "5m", limit: 600,
-      startTime: start, endTime: before - 1 }).catch(() => []),
+  const symbol = instrument.id;
+  const markStart = Math.max(listingStart, start - LIQUIDATION_LOOKBACK_MS);
+  const [interest, mark, trades] = await Promise.all([
+    historyPages(start, before, 500, (page) =>
+      binanceUsdM.fapiDataGetOpenInterestHist({ symbol, period: "5m", ...page })),
+    historyPages(markStart, before, 1000, (page) =>
+      binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", ...page })),
+    historyPages(start, before, 1000, (page) =>
+      binanceUsdM.fapiPublicGetKlines({ symbol, interval: "5m", ...page })),
   ]);
-  const pointsByTime = new Map(normalizeOpenInterest(interest.flat()).map((point) => [point.time, point]));
-  const barsByTime = new Map(markBarsFrom(mark, trades).map((bar) => [bar.time, bar]));
-  const points = [], bars = [];
-  // Only extend the replay through consecutive intervals ending at the known boundary.
-  for (let time = before - step; time >= start; time -= step) {
-    const point = pointsByTime.get(time), bar = barsByTime.get(time);
-    if (!point || !bar) break;
-    points.push(point);
-    bars.push(bar);
-  }
-  const priorBar = barsByTime.get((points.at(-1)?.time ?? before) - step);
-  if (points.length && priorBar) bars.push(priorBar);
-  return { points: points.reverse(), bars: bars.reverse() };
+  return { points: normalizeOpenInterest(interest), bars: markBarsFrom(mark, trades) };
 }
 
-export async function getBinanceLiquidationReplay(instrument: MarketInstrument, from: number, to: number) {
+const replayCache = new Map<string, {
+  from: number; to: number; expires: number; result: ReturnType<typeof loadReplay>;
+}>();
+
+export function getBinanceLiquidationReplay(instrument: MarketInstrument, from: number, to: number) {
+  const current = replayCache.get(instrument.id);
+  if (current?.from === from && current.to === to && current.expires > Date.now()) return current.result;
+  const result = loadReplay(instrument, from, to).then((data) => {
+    if (replayCache.get(instrument.id)?.result === result) {
+      replayCache.set(instrument.id, { from, to, expires: Date.now() + LIQUIDATION_INTERVAL_MS, result });
+    }
+    return data;
+  }).catch((error) => {
+    if (replayCache.get(instrument.id)?.result === result) replayCache.delete(instrument.id);
+    throw error;
+  });
+  replayCache.set(instrument.id, { from, to, expires: Infinity, result });
+  return result;
+}
+
+async function loadReplay(instrument: MarketInstrument, from: number, to: number) {
   const { id: symbol } = instrument;
   const step = LIQUIDATION_INTERVAL_MS;
-  const historicalStart = Math.max(from - LIQUIDATION_LOOKBACK_MS, Math.ceil(instrument.onboardAt / step) * step);
-  if (historicalStart > from) throw new Error("合约上市未满 24 小时，无法回放完整窗口。");
-  const oiParams = { symbol, period: "5m", limit: 300 };
-  const [before, during, mark, cap, trades, marginProfile, older] = await Promise.all([
-    historicalStart < from ? binanceUsdM.fapiDataGetOpenInterestHist({ ...oiParams, startTime: historicalStart, endTime: from - 1 }) : [],
-    binanceUsdM.fapiDataGetOpenInterestHist({ ...oiParams, startTime: from, endTime: to }),
-    binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", startTime: historicalStart - step, endTime: to - 1, limit: 600 }),
+  const start = from - LIQUIDATION_POSITION_HISTORY_MS;
+  const listingStart = Math.ceil(instrument.onboardAt / step) * step;
+  const historicalStart = Math.max(start, listingStart);
+  if (historicalStart > from) throw new Error("合约历史不足，无法回放完整窗口。");
+  const [interest, mark, cap, trades, marginProfile] = await Promise.all([
+    historyPages(historicalStart, to + step, 500, (page) =>
+      binanceUsdM.fapiDataGetOpenInterestHist({ symbol, period: "5m", ...page })),
+    historyPages(Math.max(listingStart, historicalStart - LIQUIDATION_LOOKBACK_MS), to, 1000, (page) =>
+      binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", ...page })),
     getMarketCapHistory(instrument, from),
-    binanceUsdM.fapiPublicGetKlines({ symbol, interval: "5m", startTime: from - LIQUIDATION_LOOKBACK_MS,
-      endTime: to - 1, limit: 600 }).catch(() => []),
+    historyPages(historicalStart, to, 1000, (page) =>
+      binanceUsdM.fapiPublicGetKlines({ symbol, interval: "5m", ...page })),
     getMarginProfile(symbol),
-    olderHistory(instrument, historicalStart),
   ]);
   const bars = markBarsFrom(mark, trades);
-  const priorClose = bars.find((bar) => bar.time === from - step)?.close;
-  const startSupply = Number([...before, ...during].find((row) => Number(row.timestamp) === from)?.CMCCirculatingSupply);
-  const marketCapUsd = startSupply * (priorClose ?? NaN);
-  const beforeTrades = trades.filter((row) => Number(row[0]) < from);
-  const volumeUsdt = beforeTrades.reduce((sum, row) => sum + Number(row[7]), 0);
-  const turnover = canUseContractSupply(instrument) &&
-    beforeTrades.length === LIQUIDATION_LOOKBACK_MS / step && Number.isFinite(volumeUsdt) && volumeUsdt >= 0 &&
-    Number.isFinite(marketCapUsd) && marketCapUsd > 0 ? { volumeUsdt, marketCapUsd, marketCapSource: "binance-cmc-proxy" } : null;
-  const recentPoints = normalizeOpenInterest([...before, ...during]);
-  const warmup = older.points[0]?.time ?? historicalStart;
-  const replayBars = older.points.length ? bars.filter((bar) => bar.time >= historicalStart) : bars;
-  const result = replayLiquidations(symbol, [...older.points, ...recentPoints],
-    [...older.bars, ...replayBars], warmup, from, to, cap, turnover, marginProfile);
-  const shorterReplay = warmup < historicalStart
-    ? replayLiquidations(symbol, recentPoints, bars, historicalStart, from, to, cap, turnover, marginProfile) : null;
-  const warmupComparison = shorterReplay && {
-    minutes: (from - historicalStart) / 60_000,
-    long: shorterReplay.long, short: shorterReplay.short,
-  };
-  return { ...result, warmupMinutes: (from - warmup) / 60_000, warmupComparison };
+  const points = requireLiquidationHistory(normalizeOpenInterest(interest), bars, start, to, instrument.onboardAt);
+  const warmup = points[0].time;
+  const result = await replayLiquidationsAsync(symbol, points,
+    bars, warmup, from, to, cap, marginProfile, BINANCE_POSITION_CALIBRATION, true);
+  return { ...result, warmupMinutes: (from - warmup) / 60_000 };
 }
 
 async function loadLevels(instrument: MarketInstrument) {
   const { id: symbol } = instrument;
-  const [interest, bars, response, capitalization, market, quoteResponse, marginProfile, trades] = await Promise.all([
+  const [interest, bars, response, capitalization, marginProfile, trades] = await Promise.all([
     getRecentInterestRows(symbol),
-    binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", limit: 290 }),
+    binanceUsdM.fapiPublicGetMarkPriceKlines({ symbol, interval: "5m", limit: 578 }),
     binanceUsdM.fapiPublicGetPremiumIndex({ symbol }),
     getMarketCapHistory(instrument),
-    getCirculatingMarketCap(instrument).catch(() => null),
-    binanceUsdM.fapiPublicGetTicker24hr({ symbol }).catch(() => null),
     getMarginProfile(symbol),
-    binanceUsdM.fapiPublicGetKlines({ symbol, interval: "5m", limit: 290 }).catch(() => []),
+    binanceUsdM.fapiPublicGetKlines({ symbol, interval: "5m", limit: 290 }),
   ]);
   // The single-symbol request returns an object. The generated CCXT signature uses the array form.
   const ticker = response as unknown as { symbol?: string; markPrice?: string; time?: number };
@@ -248,24 +216,17 @@ async function loadLevels(instrument: MarketInstrument) {
   }
   const points = normalizeOpenInterest(interest);
   const markBars = markBarsFrom(bars, trades);
-  const older = points.length ? await olderHistory(instrument, points[0].time) : { points: [], bars: [] };
-  const quote = Array.isArray(quoteResponse) ? null : quoteResponse;
-  const quoteVolume = quote?.symbol === symbol && quote.quoteVolume != null ? Number(quote.quoteVolume) : NaN;
-  const closeTime = Number(quote?.closeTime);
-  let turnover: TurnoverInput | null = null;
-  if (Number.isFinite(quoteVolume) && quoteVolume >= 0 && closeTime >= asOf - 300_000 && closeTime <= asOf + 60_000) {
-    if (market?.circulatingMarketCap && market.updatedAt && Math.abs(asOf - market.updatedAt) <= MARKET_CAP_DAY_MS) {
-      turnover = { volumeUsdt: quoteVolume, marketCapUsd: market.circulatingMarketCap, marketCapSource: market.sourceName };
-    } else if (canUseContractSupply(instrument)) {
-      const supplyRow = interest.findLast((row) => Number(row.timestamp) <= asOf &&
-        Number(row.timestamp) >= asOf - 900_000 && Number(row.CMCCirculatingSupply) > 0);
-      const marketCapUsd = Number(supplyRow?.CMCCirculatingSupply) * markPrice;
-      if (Number.isFinite(marketCapUsd) && marketCapUsd > 0) {
-        turnover = { volumeUsdt: quoteVolume, marketCapUsd, marketCapSource: "binance-cmc-proxy" };
-      }
-    }
-  }
-  const recentBars = older.points.length ? markBars.filter((bar) => bar.time >= points[0].time) : markBars;
-  return estimateLiquidationLevels(symbol, [...older.points, ...points], [...older.bars, ...recentBars],
-    markPrice, asOf, capitalization, turnover, marginProfile);
+  const step = LIQUIDATION_INTERVAL_MS;
+  const currentClose = Math.floor(asOf / step) * step;
+  // The latest boundary's OI may still be publishing. Require the previous one in that case.
+  const to = points.some((point) => point.time === currentClose) ? currentClose : currentClose - step;
+  if (!points.some((point) => point.time === to)) throw new LiquidationHistoryIncompleteError();
+  const start = to - LIQUIDATION_POSITION_HISTORY_MS;
+  const before = points[0].time;
+  const older = await olderHistory(instrument, start, before);
+  const recentBars = older.bars.length ? markBars.filter((bar) => bar.time >= before) : markBars;
+  const allBars = [...older.bars, ...recentBars];
+  const window = requireLiquidationHistory([...older.points, ...points], allBars, start, to, instrument.onboardAt, currentClose);
+  return estimateLiquidationLevels(symbol, window, allBars,
+    markPrice, asOf, capitalization, marginProfile, BINANCE_POSITION_CALIBRATION);
 }

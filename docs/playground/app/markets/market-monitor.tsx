@@ -3,12 +3,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
+import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import {
   DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, TURNOVER_BASELINE_MINUTES,
   getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
   recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries,
   type AlertMarketContext, type AlertRatio, type AlertTurnover, type DirectionalThresholds,
-  type LeveledPriceState, type OkxAlertRatio, type PriceAlertLevel, type PriceAlertSeries,
+  type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries,
 } from "@/lib/price-alerts";
 import SpikeForecastPanel from "./spike-forecast-panel";
 import SpikeRecords, { readSpikeRecords, saveSpikeRecords, SPIKE_RECORD_LIMIT, type SpikeRecord } from "./spike-records";
@@ -28,8 +29,9 @@ const QUEUE_LIMIT = 100;
 const TURNOVER_CONCURRENCY = 2;
 const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: null, down: -5 };
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
-const formatPrice = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
-const formatTurnover = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const formatAlertChange = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "exceptZero" });
+const formatPrice = marketNumberFormatter({ maximumSignificantDigits: 12 });
+const formatRatio = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 const formatShare = new Intl.NumberFormat("zh-CN", { style: "percent", maximumFractionDigits: 2 });
 const formatTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 
@@ -52,28 +54,15 @@ function levelRecord(symbol: string, move: PriceAlertLevel, threshold: number, s
 
 function Ratio({ data }: { data: AlertRatio | null | undefined }) {
   if (!data) return "—";
-  return <>{formatTurnover.format(data.ratio)} <small>多 {formatShare.format(data.long)} / 空 {formatShare.format(data.short)}</small>
+  return <>{formatRatio.format(data.ratio)} <small>多 {formatShare.format(data.long)} / 空 {formatShare.format(data.short)}</small>
     <small>{formatTime.format(data.time)}</small></>;
 }
 
-const okxRatioMessages = {
-  "no-contract": "OKX 无此币种的 USDT 永续合约",
-  "ambiguous-contract": "OKX 有多个候选合约，无法唯一匹配",
-  "directory-unavailable": "OKX 合约名单查询失败",
-  "no-sample": "OKX 未返回告警时可用的 5 分钟统计",
-  "rate-limited": "OKX 多空比接口限流",
-  "request-failed": "OKX 多空比接口请求失败",
-};
 const alertContextMessages = {
   "request-failed": "告警行情请求失败",
   "queue-skipped": "告警过多，已跳过行情补查",
   "monitor-stopped": "监控已停止，行情补查取消",
 };
-
-function OkxRatio({ result, reason }: { result?: OkxAlertRatio; reason: string }) {
-  if (!result) return <small>{reason}</small>;
-  return result.status === "ok" ? <Ratio data={result.data} /> : <small>{okxRatioMessages[result.status]}</small>;
-}
 
 export default function MarketMonitor({ contracts, coinCount, directoryError, showRecords }: {
   contracts: readonly MarketInstrument[] | undefined;
@@ -466,7 +455,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   }
 
   const strategy = (
-    <details className={styles.monitorFeature} open>
+    <details className={styles.monitorFeature}>
       <summary className={styles.monitorSummary}>
         <h3>异动监控 <small>{enabled ? "已启动 · 折叠后继续监控" : "已停止"}</small></h3>
       </summary>
@@ -535,46 +524,44 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
           </div>
           <p>监控币种深度调研名单里的全部币安 USDT 本位永续合约。请保持行情页打开，切换币种或交易所时监控会继续运行。</p>
         </section>
-        <details className={styles.turnover} open>
+        <details className={styles.turnover}>
           <summary className={styles.monitorSectionSummary}><h4>告警记录 <span>最近 100 条</span></h4></summary>
-          <p role="status">{alerts.length ? `最新告警 ${alerts[0].symbol} ${alerts[0].level} 级 · ${formatPercent.format(alerts[0].change)}%` : "暂无告警。"}</p>
+          <p role="status">{alerts.length ? `最新告警 ${alerts[0].symbol} ${alerts[0].level} 级 · ${formatAlertChange.format(alerts[0].change)}%` : "暂无告警。"}</p>
           {alerts.length > 0 && <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
             <table className={styles.alertTable}>
               <thead><tr>
                 <th scope="col">交易对</th><th scope="col">告警级别</th><th scope="col">触发时间</th><th scope="col">参考价 (USDT)</th>
                 <th scope="col">触发价 (USDT)</th><th scope="col">涨跌幅</th><th scope="col">阈值</th><th scope="col">窗口 (秒)</th>
                 <th scope="col">窗口成交额 (USDT)</th>
-                <th scope="col">币安全体账户多空比</th><th scope="col">OKX 全体账户多空比</th>
-                <th scope="col">币安大户多空持仓比</th><th scope="col">OKX 大户账户多空比</th>
+                <th scope="col">币安全体账户多空比/大户多空持仓比</th>
               </tr></thead>
               <tbody>
                 {alerts.map((alert) => {
-                  const context = typeof alert.context === "object" ? alert.context : undefined;
-                  const reason = typeof alert.context === "string" ? alertContextMessages[alert.context] : "未取得告警行情";
+                  const { context } = alert;
                   return <tr key={`${alert.symbol}:${alert.time}:${alert.threshold}`}>
                     <th scope="row">{alert.symbol}</th>
                     <td>{alert.level} 级</td>
                     <td><time dateTime={new Date(alert.time).toISOString()}>{formatTime.format(alert.time)}</time></td>
-                    <td>{formatPrice.format(alert.previous)}</td>
-                    <td>{formatPrice.format(alert.price)}</td>
-                    <td className={alert.change < 0 ? styles.sell : styles.buy}>{formatPercent.format(alert.change)}%</td>
+                    <td title={fullMarketNumber.format(alert.previous)}>{formatPrice(alert.previous)}</td>
+                    <td title={fullMarketNumber.format(alert.price)}>{formatPrice(alert.price)}</td>
+                    <td className={alert.change < 0 ? styles.sell : styles.buy}>{formatAlertChange.format(alert.change)}%</td>
                     <td>{formatPercent.format(alert.threshold)}%</td>
                     <td>{alert.seconds}</td>
                     <td>{alert.volume?.turnover != null && alert.volume.multiple != null
-                      ? <>{formatTurnover.format(alert.volume.turnover)} <small>{formatTurnover.format(alert.volume.multiple)} 倍</small></>
-                      : "沿用首轮核验"}</td>
-                    {alert.context === undefined ? <td colSpan={4}>正在补充多空比…</td> : <>
-                      <td><Ratio data={context?.binanceAccounts} /></td>
-                      <td><OkxRatio result={context?.okxAccounts} reason={reason} /></td>
-                      <td><Ratio data={context?.binancePositions} /></td>
-                      <td><OkxRatio result={context?.okxTopAccounts} reason={reason} /></td>
-                    </>}
+                      ? <>{formatMarketAmount(alert.volume.turnover)} <small>{formatRatio.format(alert.volume.multiple)} 倍</small></>
+                      : "升级告警"}</td>
+                    <td className={styles.alertRatios}>
+                      {context === undefined ? "正在补充多空比…" : typeof context === "string" ? <small>{alertContextMessages[context]}</small> : <>
+                        <div>全体 <Ratio data={context.binanceAccounts} /></div>
+                        <div>大户 <Ratio data={context.binancePositions} /></div>
+                      </>}
+                    </td>
                   </tr>;
                 })}
               </tbody>
             </table>
           </div>}
-          {alerts.length > 0 && <p>多空比使用告警时各平台最近一期 5 分钟统计。币安大户按保证金余额取前 20%，OKX 大户账户按未平仓头寸价值取前 5%。</p>}
+          {alerts.length > 0 && <p>多空比使用告警时币安最近一期 5 分钟统计。币安大户按保证金余额取前 20%。</p>}
         </details>
         <SpikeForecastPanel records={forecasts} />
       </div>

@@ -1,3 +1,4 @@
+import { formatMarketAmount, marketNumberFormatter } from "@/lib/market-number";
 import {
   compareForecast, estimateAlertMove, forecastAccuracy, getRecordForecast, largeTradeSide,
   type ForecastIndicators, type ForecastRecord,
@@ -6,7 +7,7 @@ import styles from "./markets.module.css";
 
 const signed = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, signDisplay: "exceptZero" });
 const number = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
-const price = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 10 });
+const price = marketNumberFormatter({ maximumSignificantDigits: 10 });
 const time = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 const flowLabels = { buy: "疑似大额主动买入", sell: "疑似大额主动卖出", mixed: "双向大额主动成交", none: "未观察到大额主动成交" };
 
@@ -16,7 +17,7 @@ function signal(change: number) {
 }
 
 function NotionalPair({ left, right }: { left: number; right: number }) {
-  return <>{number.format(left)} / {number.format(right)} USDT</>;
+  return <>{formatMarketAmount(left)} / {formatMarketAmount(right)} USDT</>;
 }
 
 function Indicators({ indicators }: { indicators: ForecastIndicators }) {
@@ -26,7 +27,7 @@ function Indicators({ indicators }: { indicators: ForecastIndicators }) {
     <dl>
       <dt>近 60 秒主动买入 / 卖出</dt><dd>{flow ? <NotionalPair left={flow.buyUsdt} right={flow.sellUsdt} /> : "—"}</dd>
       <dt>大额主动买入 / 卖出</dt><dd>{flow ? <><NotionalPair left={flow.largeBuyUsdt} right={flow.largeSellUsdt} />
-        <small>大额门槛 {number.format(flow.largeThresholdUsdt)} USDT</small></> : "—"}</dd>
+        <small>大额门槛 {formatMarketAmount(flow.largeThresholdUsdt)} USDT</small></> : "—"}</dd>
       <dt>中间价 ±0.5% 买盘 / 卖盘深度</dt><dd>{depth ? <NotionalPair left={depth.bidUsdt} right={depth.askUsdt} /> : "—"}</dd>
       <dt>最近 5 分钟未平仓数量变化</dt><dd>{interest ? `${signed.format(interest.change)}%` : "—"}</dd>
       <dt>标记价 ±2% 多头 / 空头强平估算</dt><dd>{liquidations ? <NotionalPair left={liquidations.longUsdt} right={liquidations.shortUsdt} /> : "—"}</dd>
@@ -37,7 +38,7 @@ function Indicators({ indicators }: { indicators: ForecastIndicators }) {
 
 export default function SpikeForecastPanel({ records }: { records: ForecastRecord[] }) {
   const { samples, hits, mae } = forecastAccuracy(records);
-  return <details className={styles.turnover} open>
+  return <details className={styles.turnover}>
     <summary className={styles.monitorSectionSummary}><h4>涨跌预测 <span>最近 100 条告警样本</span></h4></summary>
     <p role="status">{mae !== null
       ? `方向准确率 ${number.format(hits / samples * 100)}%（${samples} 条中对了 ${hits} 条） · 预测涨跌幅平均差 ${number.format(mae)} 个百分点`
@@ -60,11 +61,11 @@ export default function SpikeForecastPanel({ records }: { records: ForecastRecor
               <span className={change > 0 ? styles.buy : styles.sell}>{signal(change)}</span>
               {forecast ? <>
                 {!analysis?.forecast && <small>按告警时的涨跌初步估计 · {fallbackReason}</small>}
-                <small>基准 {price.format(forecast.price)} USDT · {time.format(forecast.issuedAt)}</small>
+                <small>基准 {price(forecast.price)} USDT · {time.format(forecast.issuedAt)}</small>
               </> : <small>历史告警估算 · 缺少当时基准价</small>}
             </>}</td>
             <td>{forecast ? time.format(forecast.settlesAt) : "—"}</td>
-            <td>{compared && outcome ? <>{signal(compared.actual)}<small>收盘 {price.format(outcome.price)} USDT</small></>
+            <td>{compared && outcome ? <>{signal(compared.actual)}<small>收盘 {price(outcome.price)} USDT</small></>
               : forecast ? outcome === null ? "缺少核对时的收盘价" : "待核对" : "—"}</td>
             <td>{compared ? <>{compared.hit ? "方向命中" : "方向未命中"}
               <small>误差 {number.format(compared.error)} 个百分点</small></> : "—"}</td>

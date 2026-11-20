@@ -3,16 +3,12 @@
 import { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
 import type { MarketExchange } from "@/lib/market-lookup";
+import { formatMarketPriceRange, marketNumberFormatter } from "@/lib/market-number";
 import { BOOK_REFRESH_MS, summarizeDepthGroup, type OrderBookSnapshot } from "@/lib/order-book";
 import styles from "./markets.module.css";
 
-const number = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 9 });
-const depthAmount = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-function formatDepthAmount(value: number) {
-  if (value >= 1_000_000) return `${depthAmount.format(value / 1_000_000)}M`;
-  if (value >= 1_000) return `${depthAmount.format(value / 1_000)}K`;
-  return depthAmount.format(value);
-}
+const price = marketNumberFormatter({ maximumSignificantDigits: 9 });
+const depthAmount = marketNumberFormatter({ minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const time = new Intl.DateTimeFormat("zh-CN", { timeStyle: "medium", timeZone: "Asia/Shanghai" });
 
 export function CoinOrderBook({ exchange, symbol }: { exchange: MarketExchange; symbol: string }) {
@@ -51,10 +47,10 @@ export function CoinOrderBook({ exchange, symbol }: { exchange: MarketExchange; 
         const bid = summarizeDepthGroup(book.bids, start);
         const ask = summarizeDepthGroup(book.asks, start);
         return <tr key={start}>
-          <td>{bid ? `${number.format(bid.firstPrice)}~${number.format(bid.lastPrice)}` : "—"}</td>
-          <td>{bid ? formatDepthAmount(bid.amount) : "—"}</td>
-          <td>{ask ? `${number.format(ask.firstPrice)}~${number.format(ask.lastPrice)}` : "—"}</td>
-          <td>{ask ? formatDepthAmount(ask.amount) : "—"}</td>
+          <td>{bid ? formatMarketPriceRange(bid.firstPrice, bid.lastPrice, price, "~") : "—"}</td>
+          <td>{depthAmount(bid?.amount)}</td>
+          <td>{ask ? formatMarketPriceRange(ask.firstPrice, ask.lastPrice, price, "~") : "—"}</td>
+          <td>{depthAmount(ask?.amount)}</td>
         </tr>;
       })}</tbody>
     </table></div>}

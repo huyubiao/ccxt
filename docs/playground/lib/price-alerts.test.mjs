@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
-  readOkxAlertRatio, recordDirectionalPrice, recordPrice, recordPriceLevel,
+  recordDirectionalPrice, recordPrice, recordPriceLevel,
   restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries,
 } from "./price-alerts.ts";
 
@@ -92,16 +92,6 @@ test("turnover multiples distinguish missing data from a measured zero", () => {
   assert.equal(getTurnoverMultiple({ turnover: null, baseline: 100 }), null);
   assert.equal(getTurnoverMultiple({ turnover: 300, baseline: null }), null);
   assert.equal(getTurnoverMultiple({ turnover: 300, baseline: 0 }), null);
-});
-
-test("OKX ratios use the newest usable sample at or before the alert", () => {
-  assert.deepEqual(readOkxAlertRatio([
-    ["900000", "9"], ["300000", "1"], null, ["600000", ""], ["500000", "3"],
-  ], 600000), { status: "ok", data: { time: 500000, ratio: 3, long: 0.75, short: 0.25 } });
-  assert.deepEqual(readOkxAlertRatio([["600000", "0"]], 600000), {
-    status: "ok", data: { time: 600000, ratio: 0, long: 0, short: 1 },
-  });
-  assert.deepEqual(readOkxAlertRatio([["900000", "3"], ["600000", "-1"]], 600000), { status: "no-sample" });
 });
 
 test("signed thresholds support percent input and reject invalid values", () => {

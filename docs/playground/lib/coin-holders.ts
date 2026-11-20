@@ -202,7 +202,5 @@ function getHolderSnapshot(pair: MarketInstrument): Promise<HolderSnapshot> {
 
 export async function getHolderConcentration(pair: MarketInstrument) {
   const [snapshot, overview] = await Promise.all([getHolderSnapshot(pair), getCoinOverview(pair).catch(() => null)]);
-  const supply = overview?.market ?? overview?.tokenomics;
-  return withHolderMarketCap(snapshot, supply?.supplyLimit === "capped" ? supply.maxSupply : null,
-    overview?.market?.totalMarketCap ?? null);
+  return withHolderMarketCap(snapshot, overview?.market ?? overview?.tokenomics ?? null);
 }

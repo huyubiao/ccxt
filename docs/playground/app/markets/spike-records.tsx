@@ -1,3 +1,4 @@
+import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import type { AlertTurnover } from "@/lib/price-alerts";
 import styles from "./markets.module.css";
 
@@ -30,8 +31,8 @@ export type SpikeRecord = {
 
 const formatTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
-const formatPrice = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 12 });
-const formatAmount = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const formatPrice = marketNumberFormatter({ maximumSignificantDigits: 12 });
+const formatMultiple = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 
 export function readSpikeRecords(): SpikeRecord[] {
   try {
@@ -57,10 +58,6 @@ export function saveSpikeRecords(rows: SpikeRecord[]) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(rows)); } catch { /* Keep the current session records. */ }
 }
 
-function amount(value?: number | null) {
-  return value == null ? "—" : formatAmount.format(value);
-}
-
 export default function SpikeRecords({ records }: { records: SpikeRecord[] }) {
   return (
     <section id="spike-records" className={styles.monitorPanel} aria-labelledby="spike-records-heading">
@@ -83,16 +80,16 @@ export default function SpikeRecords({ records }: { records: SpikeRecord[] }) {
                     <th scope="row">{row.symbol}</th>
                     <td>{row.level} 级</td>
                     <td><time dateTime={new Date(row.time).toISOString()}>{formatTime.format(row.time)}</time></td>
-                    <td>{formatPrice.format(row.previous)}</td>
-                    <td>{formatPrice.format(row.price)}</td>
+                    <td title={fullMarketNumber.format(row.previous)}>{formatPrice(row.previous)}</td>
+                    <td title={fullMarketNumber.format(row.price)}>{formatPrice(row.price)}</td>
                     <td className={row.change < 0 ? styles.sell : styles.buy}>
                       {formatPercent.format(row.change)}% / {formatPercent.format(row.threshold)}%
                     </td>
                     <td>{row.seconds}</td>
-                    <td>{amount(row.volume?.turnover)}</td>
-                    <td>{amount(row.volume?.baseline)}</td>
-                    <td>{row.requiredMultiple === null ? "沿用首轮核验"
-                      : <>{row.volume?.multiple == null ? "—" : `${amount(row.volume.multiple)} 倍`} / {amount(row.requiredMultiple)} 倍</>}</td>
+                    <td>{formatMarketAmount(row.volume?.turnover)}</td>
+                    <td>{formatMarketAmount(row.volume?.baseline)}</td>
+                    <td>{row.requiredMultiple === null ? "升级告警"
+                      : <>{row.volume?.multiple == null ? "—" : `${formatMultiple.format(row.volume.multiple)} 倍`} / {formatMultiple.format(row.requiredMultiple)} 倍</>}</td>
                     <td>{statusLabels[row.status]}</td>
                   </tr>
                 ))}

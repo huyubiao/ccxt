@@ -105,5 +105,6 @@ export type MarketVolume = {
   asOf: number;
   shortAsOf: number;
   convertedFrom: string | null;
+  volumeMultiple?: number | null;
   windows: VolumeWindow[];
 };

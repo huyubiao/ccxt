@@ -33,6 +33,7 @@
 .alertScroll { max-height: 360px; overflow-y: auto; }
 .alertTable thead { position: sticky; top: 0; background: hsl(var(--card)); }
 .alertTable small { display: block; color: hsl(var(--muted-foreground)); }
+.alertRatios > div + div { margin-top: 0.375rem; }
 .spikeRecords { padding: 16px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
 .spikeRecords p { margin: 0 0 12px; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .spikeRecords p:last-child { margin-bottom: 0; }
@@ -227,16 +228,114 @@
 .monitorSectionSummary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 .turnover p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .tableScroll { overflow-x: auto; }
-.liquidationGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 16px; }
-.liquidationGrid > div { min-width: 0; }
-.liquidationGrid h5 { margin: 12px 0 4px; font-size: 13px; }
-.liquidationOrder { margin-top: 12px; }
-.liquidationChart { margin: 12px 0 0; }
-.liquidationChart figcaption { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; }
-.liquidationChart svg { display: block; width: 100%; min-width: 560px; }
+.liquidationParameters { margin-top: 14px; }
+.liquidationParameters h5 { margin: 0 0 6px; font-size: 13px; }
+.liquidationParameters .metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr)); }
+.liquidationParameters dd small { display: block; margin-top: 4px; color: hsl(var(--muted-foreground)); }
+.liquidationParameters caption { padding: 10px 0 2px; text-align: left; font-weight: 600; }
+.liquidationChart { margin: 16px 0 12px; }
+.liquidationChart figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+.liquidationChart figcaption span { display: inline-flex; align-items: center; gap: 6px; }
+.liquidationLegendSquare { width: 8px; height: 8px; border-radius: 2px; background: currentColor; }
+.liquidationLegendMark, .liquidationLegendThreshold { width: 16px; border-top: 2px dashed hsl(var(--foreground)); }
+.liquidationLegendThreshold { border-color: hsl(var(--warning)); }
+.liquidationExtremeLegend { border-color: hsl(var(--destructive)); }
+.liquidationRiskGroups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.liquidationRiskGroups > section {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.liquidationRiskGroups h5 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 0 3px;
+  font-size: 13px;
+}
+.liquidationRiskGroups h5 span + span { color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 500; }
+.liquidationRiskList {
+  --risk-row-height: 42px;
+  --risk-row-gap: 4px;
+  display: grid;
+  gap: var(--risk-row-gap);
+  max-height: calc(3 * var(--risk-row-height) + 2 * var(--risk-row-gap));
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scroll-snap-type: y proximity;
+}
+.liquidationRiskChoice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--risk-row-height);
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: hsl(var(--card-muted));
+  color: hsl(var(--foreground));
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+  scroll-snap-align: start;
+}
+.liquidationRiskChoice[data-side="long"] { --risk-color: var(--destructive); }
+.liquidationRiskChoice[data-side="short"] { --risk-color: var(--success); }
+.liquidationRiskChoice:is([data-risk="high"], [data-risk="extreme"]) { background: hsl(var(--risk-color) / .09); }
+.liquidationRiskChoice:hover { background: hsl(var(--risk-color) / .14); }
+.liquidationRiskChoice[aria-pressed="true"] { border-color: hsl(var(--risk-color)); }
+.liquidationRiskChoice:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
+.liquidationRiskBadge {
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.liquidationRiskChoice:is([data-risk="high"], [data-risk="extreme"]) .liquidationRiskBadge {
+  background: hsl(var(--risk-color) / .18);
+  color: hsl(var(--foreground));
+}
+.liquidationRiskChoice[data-risk="extreme"] .liquidationRiskBadge { background: hsl(var(--risk-color) / .30); }
+.liquidationRiskPrice, .liquidationRiskChoice strong { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.liquidationRiskPrice { overflow-wrap: anywhere; }
+.liquidationPlot { border: 1px solid hsl(var(--border)); border-radius: var(--radius); }
+.liquidationChart svg { display: block; width: 100%; min-width: 680px; }
 .liquidationChart text { fill: hsl(var(--muted-foreground)); font: 12px var(--mono); }
 .liquidationGridline { stroke: hsl(var(--border)); }
+.liquidationThreshold { stroke: hsl(var(--warning)); stroke-width: 1.5; stroke-dasharray: 6 4; pointer-events: none; }
+.liquidationExtremeThreshold { stroke: hsl(var(--destructive)); stroke-dasharray: 3 3; }
 .liquidationMark { stroke: hsl(var(--foreground)); stroke-dasharray: 4 4; }
+.liquidationCallout { pointer-events: none; }
+.liquidationCallout path { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.liquidationCallout rect { fill: hsl(var(--card)); stroke: currentColor; }
+.liquidationChart .liquidationCalloutRisk { fill: hsl(var(--foreground)); font: 600 13px sans-serif; }
+.liquidationLive {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.liquidationLiveHeader { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+.liquidationLiveHeader h5 { margin: 0; font-size: 13px; }
+.liquidationLive > div + div { margin-top: 6px; }
 .liquidationMethod { margin-top: 10px; font-size: 12px; line-height: 1.6; }
 .liquidationMethod summary { cursor: pointer; font-weight: 600; }
 .liquidationMethod ol, .liquidationMethod ul { padding-left: 20px; }

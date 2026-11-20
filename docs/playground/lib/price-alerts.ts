@@ -13,15 +13,10 @@ export type PriceAlertLevel = { level: number; previous: number; target: number;
 export type PriceAlertSeries = { latest: PriceAlertLevel; confirmed: boolean };
 export type LeveledPriceState = PriceAlertState & { series?: PriceAlertSeries };
 export type AlertRatio = { ratio: number; long: number; short: number; time: number };
-export type OkxAlertRatio =
-  | { status: "ok"; data: AlertRatio }
-  | { status: "no-contract" | "ambiguous-contract" | "directory-unavailable" | "no-sample" | "rate-limited" | "request-failed" };
 export type AlertMarketContext = {
   turnover: number | null;
   binanceAccounts: AlertRatio | null;
   binancePositions: AlertRatio | null;
-  okxAccounts: OkxAlertRatio;
-  okxTopAccounts: OkxAlertRatio;
 };
 export type AlertTurnover = { turnover: number | null; baseline: number | null };
 
@@ -44,23 +39,6 @@ export function getTurnoverMultiple({ turnover, baseline }: AlertTurnover): numb
       baseline === null || !Number.isFinite(baseline) || baseline <= 0) return null;
   const multiple = turnover / baseline;
   return Number.isFinite(multiple) ? multiple : null;
-}
-
-export function readOkxAlertRatio(rows: unknown[], time: number): OkxAlertRatio {
-  let latest: AlertRatio | undefined;
-  for (const row of rows) {
-    if (!Array.isArray(row)) continue;
-    const [timestamp, value] = row;
-    if ((typeof timestamp !== "number" && typeof timestamp !== "string") ||
-        (typeof value !== "number" && (typeof value !== "string" || !value.trim()))) continue;
-    const ts = Number(timestamp);
-    const ratio = Number(value);
-    if (!Number.isSafeInteger(ts) || ts <= 0 || ts > time || !Number.isFinite(ratio) || ratio < 0 ||
-        (latest && ts <= latest.time)) continue;
-    const short = 1 / (1 + ratio);
-    latest = { time: ts, ratio, long: 1 - short, short };
-  }
-  return latest ? { status: "ok", data: latest } : { status: "no-sample" };
 }
 
 function readSignedThreshold(value: string): number | null {

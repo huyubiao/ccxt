@@ -2,18 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
+import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import type { CoinOverview, CoinUnlock, Tokenomics, UnlockAllocation } from "@/lib/coin-overview";
 import styles from "./markets.module.css";
 import CoinHolders from "./coin-holders";
 
-const dollars = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
-const tokens = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 });
+const tokens = marketNumberFormatter({ maximumFractionDigits: 6 });
 const time = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
 });
 
 function usd(amount: number | null) {
-  return amount == null ? "—" : `${dollars.format(amount)} USD`;
+  return amount == null ? "—" : <span title={`${fullMarketNumber.format(amount)} USD`}>{formatMarketAmount(amount)} USD</span>;
 }
 
 function releaseLabel(event: CoinUnlock) {
@@ -39,7 +39,7 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
           <dd>{unlock.timeKind === "interval-estimate" && unlock.periodStart != null
             ? `${time.format(unlock.periodStart)} 至 ${time.format(unlock.time)}（区间估算）`
             : <time dateTime={new Date(unlock.time).toISOString()}>{time.format(unlock.time)}</time>}</dd></div>
-        <div><dt>解锁数量</dt><dd>{tokens.format(unlock.amount)} {coin}</dd></div>
+        <div><dt>解锁数量</dt><dd>{tokens(unlock.amount)} {coin}</dd></div>
         <div><dt>解锁估值</dt><dd>{usd(price === null ? null : unlock.amount * price)}</dd></div>
       </dl>
       {unlock.allocations.length > 0 ? (
@@ -55,8 +55,8 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
                 return (
                   <tr key={id}>
                     <th scope="row">{title}{rows.length > 0 && <small>{rows.map(({ name }) => name).join("、")}</small>}</th>
-                    <td>{quantity === null ? "—" : tokens.format(quantity)}</td>
-                    <td>{price === null || quantity === null ? "—" : dollars.format(quantity * price)}</td>
+                    <td>{tokens(quantity)}</td>
+                    <td>{price === null || quantity === null ? "—" : formatMarketAmount(quantity * price)}</td>
                   </tr>
                 );
               })}
@@ -70,7 +70,7 @@ function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | nul
       {unlock.note && <p className={styles.fundamentalsNote}>{unlock.note}</p>}
       <a className={styles.fundamentalsLink} href={unlock.sourceUrl} target="_blank" rel="noreferrer">{unlock.sourceName} 解锁来源</a>
       {unlock.sourceChecks?.map((check) => <p className={styles.fundamentalsNote} key={check.sourceName}>
-        {check.agrees ? "数量接近" : "数量有差异"} · {tokens.format(check.amount)} {coin}{" · "}
+        {check.agrees ? "数量接近" : "数量有差异"} · {tokens(check.amount)} {coin}{" · "}
         <a className={styles.fundamentalsLink} href={check.sourceUrl} target="_blank" rel="noreferrer">{check.sourceName}</a>
       </p>)}
     </>
@@ -84,7 +84,7 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
       <dl className={styles.metrics}>
         <div><dt>发行机制</dt><dd>权益证明（PoS）持续发行</dd></div>
         <div><dt>新增发行分配给</dt><dd>{staking.recipients}</dd></div>
-        <div><dt>每日新增发行</dt><dd>{staking.dailyIssuance === null ? "随网络状态变化，暂未取得日统计" : `${tokens.format(staking.dailyIssuance)} ${data.symbol}`}</dd></div>
+        <div><dt>每日新增发行</dt><dd>{staking.dailyIssuance === null ? "随网络状态变化，暂未取得日统计" : `${tokens(staking.dailyIssuance)} ${data.symbol}`}</dd></div>
         <div><dt>下一次减半</dt><dd>无固定减半计划</dd></div>
         <div><dt>手续费销毁</dt><dd>{staking.hasFeeBurn ? "按协议销毁基础费用" : "未启用"}</dd></div>
       </dl>
@@ -98,12 +98,12 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
       <p className={styles.fundamentalsNote}>通过区块奖励持续发行，分配给矿工。</p>
       {mining ? <>
         <dl className={styles.metrics}>
-          <div><dt>每区块新发行（快照）</dt><dd>{tokens.format(mining.blockReward)} {data.symbol}</dd></div>
-          <div><dt>每日新增（估算）</dt><dd>{tokens.format(mining.estimatedDailyIssuance)} {data.symbol}</dd></div>
+          <div><dt>每区块新发行（快照）</dt><dd>{tokens(mining.blockReward)} {data.symbol}</dd></div>
+          <div><dt>每日新增（估算）</dt><dd>{tokens(mining.estimatedDailyIssuance)} {data.symbol}</dd></div>
           <div><dt>下一次减半（预计）</dt><dd><time dateTime={new Date(mining.estimatedHalvingTime).toISOString()}>{time.format(mining.estimatedHalvingTime)}</time></dd></div>
           <div><dt>减半目标高度</dt><dd>{mining.nextHalvingHeight.toLocaleString()}</dd></div>
-          <div><dt>减半后每区块新发行</dt><dd>{tokens.format(mining.nextBlockReward)} {data.symbol}</dd></div>
-          <div><dt>减半后每日新增（估算）</dt><dd>{tokens.format(mining.nextEstimatedDailyIssuance)} {data.symbol}</dd></div>
+          <div><dt>减半后每区块新发行</dt><dd>{tokens(mining.nextBlockReward)} {data.symbol}</dd></div>
+          <div><dt>减半后每日新增（估算）</dt><dd>{tokens(mining.nextEstimatedDailyIssuance)} {data.symbol}</dd></div>
         </dl>
         <p className={styles.fundamentalsNote}>按目标出块间隔估算，实际每日发行量随出块数量变化。减半由区块高度决定。
           估算基于区块 {mining.blockHeight.toLocaleString()}，快照日期 {time.format(data.updatedAt)}。
@@ -115,7 +115,7 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
   }
   return <>
     <dl className={styles.metrics}>
-      <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未核实" : `${tokens.format(data.lockedAmount)} ${data.symbol}`}</dd></div>
+      <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未核实" : `${tokens(data.lockedAmount)} ${data.symbol}`}</dd></div>
     </dl>
     <div className={styles.tableScroll}>
       <table className={styles.unlockTable}>
@@ -128,14 +128,14 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
               : <><time dateTime={new Date(event.time).toISOString()}>{time.format(event.time)}</time>
                 <small>{releaseLabel(event)}{event.sourceChecks?.some((check) => !check.agrees) && " · 来源有差异"}</small></>
               : `第 ${index + 1} 次待补充`}</th>
-            <td>{event ? tokens.format(event.amount) : "—"}</td>
+            <td>{tokens(event?.amount)}</td>
             <td>{event?.supplyPercentage == null ? "—" : `${event.supplyPercentage.toFixed(4)}%`}</td>
           </tr>;
         })}</tbody>
       </table>
     </div>
     {data.percentageSupply !== null && <p className={styles.fundamentalsNote}>
-      占比按{data.percentageBasis === "maxSupply" ? "供应上限" : "快照总供应量"} {tokens.format(data.percentageSupply)} {data.symbol} 计算。
+      占比按{data.percentageBasis === "maxSupply" ? "供应上限" : "快照总供应量"} {tokens(data.percentageSupply)} {data.symbol} 计算。
       {data.sourceUrl && <>{" "}<a className={styles.fundamentalsLink} href={data.sourceUrl} target="_blank" rel="noreferrer">{data.sourceName} 供应量来源</a></>}
     </p>}
     {data.events.map((event) => <details key={`${event.time}:${event.mechanism}:${event.sourceName}:${event.amount}`}>
@@ -143,7 +143,7 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
       <Allocation unlock={event} price={price} />
     </details>)}
     {data.nextCliff && <details>
-      <summary>下一笔集中解锁 · {time.format(data.nextCliff.time)} · {tokens.format(data.nextCliff.amount)} {data.symbol}</summary>
+      <summary>下一笔集中解锁 · {time.format(data.nextCliff.time)} · {tokens(data.nextCliff.amount)} {data.symbol}</summary>
       <Allocation unlock={data.nextCliff} price={price} />
     </details>}
     {data.kind === "unknown" && <p className={styles.fundamentalsNote}>发行或锁仓计划尚未核实。</p>}

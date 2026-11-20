@@ -85,126 +85,197 @@ absolute error in percentage points over settled forecasts in the latest
 after reopening the page. Older records with only the alert move display a
 retrospective estimate without a settlement score.
 
-Research shows Binance liquidation pressure bands, also
-available via `GET /api/markets/liquidations?symbol=JCTUSDT`. The response
-includes the model version, mark price, snapshot and open-interest timestamps,
-and ranked bands with direction, price bounds, distance, estimated liquidation
-notional (`estimatedLiquidationUsdt`), and relative strength. The chart and API
-also report `cumulativeEstimatedLiquidationUsdt`, summing same-side bands from
-the mark to the outside edge of each target band.
-The liquidation model allocates initial and newly opened positions on each
-side across baseline 1x, 2x, 3x, 5x, 10x, and 20x scenarios. Both live
-estimates and replay read the current Binance public leverage and margin
-schedule. The first bracket provides the leverage ceiling. If the ceiling
-is above 20x, half of the 20x weight is distributed equally across supported
-50x, 75x, 100x, 125x and ceiling scenarios, including the ceiling once.
-Below 20x, unsupported tiers are merged into the ceiling. The snapshot is
-cached for one hour. Trigger prices use the maintenance rate and deduction
-for the modeled account notional at the trigger. Representative entry
-notionals are half the first bracket cap above 20x and twice the first cap
-otherwise, limited to 95% of the largest cap permitted at that leverage.
-If the schedule is unavailable, BTCUSDT falls back to splitting
-the 20x allocation into 20x, 50x, 75x, and 100x at 50%, 25%, 15%, and 10%.
-CAKEUSDT splits its 20x allocation into 20x, 50x, and 75x at 75%, 20%, and 5%.
-In those two fallback profiles, scenarios above 20x use the published first-bracket
-maintenance rate (0.4% for BTCUSDT and 1% for CAKEUSDT).
-These shares are uncalibrated. The model selects the longest
-complete 360-, 180-, 60-, or 30-day daily circulating market-cap window.
-Contracts listed on Binance for less than 30 days can use available
-post-listing daily samples. CoinGecko is preferred, with the Binance/CMC
-daily proxy as a fallback. The cap bands have upper bounds of USD 20M,
-60M, 200M, 1B, 5B, and 30B, with the last band starting at 30B. Without history,
-BTC and ETH use the top band and other contracts use the bottom band.
+Research shows the Binance long/short liquidation risk chart. The snapshot
+API at GET /api/markets/liquidations?symbol=JCTUSDT returns price bands and
+their openInterestShare and riskLevel. The chart grades modeled position
+concentration if the mark price reaches each band. It exposes the price
+bounds, direction, mark price and snapshot coverage. The API also retains
+the modeled band notional fields for strategy calculations.
 
-Turnover uses Binance's rolling 24-hour perpetual quote volume in USDT divided
-by the latest circulating market cap in USD, treating USDT as USD for this
-ratio. Its six bands split at 17.5%, 25%, 50%, 100%, and 200%, including equality
-in the lower band. Missing turnover leaves the turnover adjustment neutral.
-`leverageWeighting` returns both inputs, band factors, and applied weights.
-The product of the two factors scales the 5x, 10x, and 20x baseline allocations
-by its square root, itself, and its square respectively. The remaining weight
-goes to 1x, 2x, and 3x. The 1x share of that pool starts at 20% for longs and
-30% for shorts and gains `0.25 × (1 − combined factor)`; 2x and 3x share the
-rest in their original proportions. The baseline assumes
-a 75/25 notional mix of larger and smaller positions. `marginScenarios` then
-splits each leverage allocation among positions adding 0%, 25%, 50%, 100%,
-or 200% of initial margin. The corresponding quantity weights are
-35/25/20/15/5% for longs and 15/20/25/25/15% for shorts. These are uncalibrated
-assumptions about collateral available before liquidation.
-Individual account balances, deposit timing, and fees are outside the inputs.
-At the start of the reconstruction, the model distributes the observed initial
-open interest across entry proxies at the previous completed mark candle's
-low, close, and high (25%, 50%, 25%). It retains only scenarios that could still
-be open at that close. If the preceding mark candle is missing, the model
-starts tracking from subsequent changes. For new positions it uses the
-five-minute mark close as the entry proxy. Additional margin moves the trigger
-farther from entry.
+Live estimates and alert replay allocate new positions across 1x, 2x,
+3x, 4x, 5x, 7x, 10x, 20x, and 50x. Both paths read the Binance public leverage
+and margin schedule and use `binance-position-calibrated-2026-11-20`. A contract
+with a maximum below 50x receives the 50x
+weight at 20x. If its maximum is below 20x, all weight above that maximum
+is assigned to the maximum.
+The server fetches
+the full public table in one request and caches validated schedules by symbol
+for one hour. When a refresh fails or omits a symbol, its last validated
+schedule can be used for up to 24 hours from its fetch time. A new estimate
+requires a complete exchange schedule. Trigger prices use the maintenance rate and deduction
+for the modeled account notional at the trigger. Representative entry
+notionals are twice the first bracket cap, limited to 95% of the largest cap
+permitted at that leverage.
+The model prefers the longest complete 360-, 180-, 60-, or 30-day
+CoinGecko daily circulating market-cap window and can use a complete 30- or
+7-day Binance/CMC window as a fallback.
+Contracts listed on Binance for less than 30 days can use available
+post-listing daily samples. The cap bands have upper bounds of USD 30M,
+200M, 1B, 4.5B, 15B, and 45B, with the last band starting at 45B. The factors
+from lowest to highest are 0.4681, 0.6029, 0.7765, 1.0000, 1.2879, 1.6586,
+and 2.1361. Without market cap history, BTCUSDT and ETHUSDT use the highest band
+and other contracts use the neutral band (1.0000).
+
+At each modelled opening, count five-minute mark-price candles in the previous
+24 hours whose range (high minus low, divided by open) strictly exceeds each
+of 0.5%, 1%, 2%, 4%, and 8%. Use the highest threshold exceeded by at least five
+of the 288 completed candles. Levels 1 to 6 use factors of 1.0000, 0.6970,
+0.4858, 0.3386, 0.2360, and 0.1645. The level falls as qualifying candles leave the
+rolling window. Level 1 (1.00) applies if no threshold
+qualifies or the window is incomplete. Once opened, each modeled cohort keeps
+its leverage. The latest `leverageWeighting` describes newly opened positions.
+The API exposes the market-cap, volatility, and combined factors, and the
+panel shows the current long and short weights and effective margin rates.
+
+The table gives the starting allocations at a combined factor of 1.
+
+| Position side | 1x | 2x | 3x | 4x | 5x | 7x | 10x | 20x | 50x |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Long | 65.3934% | 20.9614% | 5.7870% | 3.2557% | 0.1497% | 0.0050% | 3.0976% | 0.7774% | 0.5728% |
+| Short | 50.4771% | 40.1545% | 2.9852% | 5.8738% | 0.2741% | 0.0050% | 0.0050% | 0.0050% | 0.2202% |
+| Effective margin at 0.5% maintenance | 100.00% | 64.85% | 43.18% | 32.35% | 20.00% | 14.29% | 10.00% | 3.65% | 1.55% |
+
+Multiply the 5x, 7x, 10x, 20x, and 50x base weights by the product of the
+market-cap and volatility factors. The remainder goes to 1x through 4x in
+order, using 68.5483%, 21.9727%, 6.0662%, and 3.4128% for longs and
+50.7355%, 40.3601%, 3.0005%, and 5.9039% for shorts.
+Each allocation creates one modeled cohort for its side, entry and leverage.
+For each leverage after fallback, derive an effective maintenance rate from the
+Binance bracket rate minus its deduction divided by the representative notional.
+The effective margin rate adds a calibrated multiple of the buffer between that
+rate and `1 / leverage`. The multipliers for 1x through 4x, above 4x through 10x,
+and above 10x are 1.30, 1.00, and 0.70. The 1x rate is capped at 100%.
+The model multiplies entry price by the effective margin rate to get margin per
+unit. Individual account balances, deposit timing, and fees are outside the inputs.
+The reconstruction starts with no modeled positions. The first observed open
+interest is the baseline for measuring changes; existing positions at that
+point are not assigned entry or liquidation prices. The model adds positions
+from later net increases and estimated turnover. Net increases use the
+five-minute mark close as the entry proxy.
 Nonpositive liquidation prices are excluded from price bands.
 `positionAddScenario` assigns up to 20% of a positive open-interest change
 per side to one-time adds to surviving cohorts. A cohort must have closed at
 least halfway from its entry to its liquidation price. The added tranche uses
-the same leverage and fresh initial margin. The model assigns size only where
+the same leverage and effective margin rate. The model assigns size only where
 the combined liquidation price moves farther from the mark, with a cap of 25%
 of each eligible cohort's surviving size. It deducts allocated size from the
 same-side quantity available for new cohorts. This is an uncalibrated scenario.
-The model reduces cohorts as open interest falls and removes levels crossed by
-the mark after formation. It estimates additional turnover that leaves net open
-interest unchanged using regular contract candle volume. The per-side bound for
-equal replacement on both sides is the minimum of starting open interest,
-ending open interest, and half the volume remaining after the absolute net
-change. The model replaces 10% of that bound at the candle close. Missing or
-inconsistent volume leaves only the net open-interest update.
-Estimated notional sums modeled position quantity times estimated liquidation
-price within each band. Actual forced fills and trader losses are separate
-metrics. Strength is normalized to the largest surviving band in each snapshot.
-The liquidation estimates refresh about once a minute. The tables group fine
-bands into wider ranges up to −80% for longs and +300% for shorts, keeping price order.
-The collapsible spike list shows the bounds and estimated amounts of qualifying
-0.5% price bands, with longs on the left and shorts on the right. Each side is
-sorted by amount, largest first. A band qualifies when its amount reaches 20% of
-its side's largest band and is at least twice each neighboring mean, computed
-from up to two same-side bands in each direction. Empty neighboring bands count as zero.
-Forecast responses identify their amount basis and validation status as
-`modeled-notional` and `uncalibrated`.
-The `coverage` field reports the latest open-interest quantity and the modeled
-long and short quantities included in the chart. Each side is compared separately
-with the same open-interest quantity. The page leaves coverage unavailable when
-open interest is zero and labels zero table amounts as unavailable from the model.
-For backtesting, retain snapshots with their capture time. An empty list means
-no modeled levels survived, whereas HTTP 502 means inputs were unavailable.
+The model removes levels crossed by the mark after formation and uses regular
+contract candle volume to estimate position exits and replacements. After
+accounting for the absolute net open-interest change, it assigns 50% of the
+remaining volume equally to offsetting double opens and double closes. The
+rest is single-side turnover.
+For rising candles, 65% of single-side turnover is assigned to long exits
+and 35% to short exits. Falling candles reverse those shares. Flat candles,
+or candles without a verified open, use equal shares. Single-side turnover
+uses the contract's five-minute volume-weighted average trade price for new
+entries, computed as quote volume divided by base volume. It falls back to the
+mark close if the average is unavailable. Net OI increases and replacements
+from offsetting double opens use the mark close. For each side, offsetting
+double closes and single-side turnover apply exponential retention to the
+stock remaining after the net OI reduction, with mean open interest as the
+rate denominator.
+Cohorts crossed earlier in the candle are removed first. Their quantities
+offset same-side net OI reductions, then offsetting double closes, then
+single-side turnover. Net OI reductions exit profitable cohorts proportionally,
+then other eligible and unidentified starting stock proportionally. Losing
+positions whose mark close moves at least halfway toward
+their liquidation trigger are used last for net reductions.
+For each side, the remaining exit quantity from offsetting double closes and
+turnover is split in a 60/30/9/1 ratio. The 60% share favors smaller absolute
+moves from entry, with
+greater distance from the liquidation trigger as a tie-breaker. The 30% share
+uses unidentified starting stock first, then the earliest opening times among
+cohorts eligible for the main allocation. Equal opening times favor greater
+distance from liquidation. The 9% share goes to the positions with the highest
+positive returns first. The 60% and 9% allocations use a reference price that blends
+mark close and trade VWAP by the respective remaining double-close and turnover
+exit quantities. The 1% share is allocated proportionally across near-liquidation
+losing positions. Unfilled 30%, 9%, and 1% shares go to the 60% allocation. If
+that allocation exhausts eligible modeled positions, it uses unidentified starting stock and
+then remaining near-liquidation positions proportionally. These exits retain the
+trigger and collateral of surviving positions. `positionExitScenario` records
+these model parameters in live and replay responses.
+Gross turnover can exceed endpoint open interest because a position can change
+hands repeatedly. Estimated surviving new exposure enters the model at the
+next candle boundary. If reported volume is below the absolute net open-interest change, the
+model uses only the net open-interest update.
+Each band is 1% of the current mark price. Divide the sum of its modeled
+position quantities by the latest open interest on the same side. Shares
+of at least 6% are extreme risk, 3% to below 6% are high risk, 0.25% to below
+3% are elevated, and other occupied bands are low risk. The chart refreshes about once a
+minute. Every high- and extreme-risk band can be selected in the list, which shows up
+to three entries per side at a time and scrolls for the rest.
+The grades express modeled exposure conditional on price reaching the band.
+The coverage field divides each side’s charted quantity by the same open
+interest, showing the nonnegative remainder as unassigned.
 
-The research panel's 24-hour backtest also has an API at
-`GET /api/markets/liquidations/backtest?symbol=INITUSDT`. It replays closed
-five-minute Binance mark and open-interest bars in order, initializing cohorts
-from up to 72 preceding hours of consecutive data. Live snapshots use the
-same maximum position history. The replay freezes the leverage weights at the start
-of the tested period and counts each modeled cohort only on its first touch.
-The window ends one bar before the latest five-minute boundary to allow open
-interest to publish. Swolecharts and CoinBoss provide historical HTTP data.
-CryptoHFTData provides hourly Binance Parquet files, summed at average fill
-price times filled quantity in USDT. Missing files are reported as partial
-coverage because files may lag or be absent in quiet hours. References are
-filtered to the same Binance perpetual contract and compared separately.
-Archive coverage does not imply coverage of every forced fill on Binance.
-The replay runs the same position model as the live price bands. The interval
-comparison reports per-side turnover bounds and estimated replacements in base
-units. It groups the selected source and side by whether the five-minute mark
-high divided by the low minus one reaches 1%, then reports zero-estimate misses
-among intervals with recorded events and signed aggregate amount differences.
-Third-party amounts are used only for comparison. Deltas against incomplete references
-are labeled as sample comparisons and cannot measure full-window error.
-If no modeled price is touched, the API and table display numeric zero.
-A reference with records on that side flags a model miss. With a verified
-exchange margin profile, 20% of unaugmented positions above 20x are modeled
-with one quarter of the original price buffer to represent cross-margin
-accounts with impaired collateral. This redistributes modeled quantity
-without increasing it.
-The API returns 5-minute model and per-provider buckets, with separate
-long/short deltas. The page ranks 5-minute differences for the selected
-direction and source. Missing buckets from a partial source stay unknown.
-When older data is available, the response also reports the result of
-rebuilding with up to 24 hours of warmup while holding model assumptions
-constant.
+The live estimate requires a full 24-hour window of five-minute open interest,
+mark candles, and contract volume. For contracts listed within that window,
+it starts at the first published open-interest point after listing. Missing
+data inside the required range causes the estimate to fail. Earlier mark
+candles supply volatility inputs for the positions opened near the start.
+
+Opening a contract’s risk chart also subscribes to Binance USDⓈ-M Futures
+at `/market/ws/<symbol>@forceOrder`. The panel sums completed orders with
+positive filled quantity by exchange trade time in five-minute windows.
+A SELL is a long liquidation, and a BUY is a short liquidation. Each
+reported amount is average fill price times cumulative filled quantity.
+
+The model uses the latest snapshot received by the window's opening time,
+with market data no more than three minutes old. After the mark candle
+closes, its low triggers long positions and its high triggers short
+positions. The model sums each reached position's quantity times its
+liquidation price. The table shows both sides, their total, the difference
+from Binance, and the relative error where the reported amount is positive.
+The public stream is sampled. The table labels partial coverage and
+withholds differences when a window lacks a prior snapshot or continuous
+stream coverage. Each visit starts a new in-memory session with up to 48
+closed windows. A closed connection retries automatically.
+
+The historical risk-band backtest API uses GET /api/markets/liquidations/backtest?symbol=INITUSDT.
+The replay warms up the same position model as the live chart for 24 hours
+or from listing. For each five-minute test interval it rebuilds the same 1%
+risk bands using the latest close already known five minutes before the
+target interval begins. It keeps bands with at least 3% of their side’s
+outstanding positions. No target-interval prices determine the prediction.
+
+A platform event is at least 10,000 USD in recorded liquidations for one
+contract, direction and interval. CryptoHFTData uses USDT. The backtest
+puts each priced fill in the predicted band containing its price. Band
+bounds include the lower price and exclude the upper price. An event is a
+hit if the total in any one predicted band reaches the same 10,000 threshold.
+The event detail shows observed prices, amounts, and each predicted band.
+
+Missing snapshots or incomplete prices leave a case undetermined unless
+the priced fills already prove a hit. Hit rate divides hits by the number
+of hits and misses. The Swolecharts time series supplies aggregate amounts,
+so its large-event count is visible with band results undetermined.
+CoinBoss supplies order records with prices when available. CryptoHFTData
+supplies hourly archives with average fill prices and filled quantities.
+Providers are compared separately. The window ends one bar before the latest
+five-minute boundary to allow open interest to publish.
+
+The earlier `binance-swolecharts-2026-11-19` profile used tiers up to 100x.
+Its calibration fitted 47 contracts using the seven days
+ending November 12 at 11:00 UTC. The following seven days were held out.
+On 82 contracts with comparable observations, the median absolute percentage
+error of the seven-day total fell from 85.5% to 64.0%. The new estimate was
+closer for 65 contracts. The pooled total moved from 3.0% below the reference
+to 12.7% above it. For the 35 contracts excluded from training, the median
+error fell from 86.0% to 67.6%. Weight normalization and leverage ceilings
+were verified for the 764 active Binance USDT perpetuals. The SwoleCharts
+market directory matched 521 of those contracts at capture time. Historical
+coverage can differ from the directory, so the backtest checks each window.
+[SwoleCharts API documentation](https://swolecharts.com/developers)
+
+The seven-day amount figures above apply to that earlier profile. An earlier
+alert score was fitted on the first four days of the November 12–19 replay
+using five contracts. On the last three days across six contracts, including
+BTC, mean average precision by contract, direction and day rose from 16.8%
+to 20.9%. Using the same conservative price confirmation, the previous score
+confirmed zero alerts and the fitted score confirmed 29, of which 24 fell
+in a Swolecharts event interval. This covered 24 of 891 recorded event intervals.
 
 Token details read supply limits, locked balances, and future releases from
 `lib/coin-unlock-snapshot.json`. The importer matches sources to perpetual
@@ -269,8 +340,10 @@ the rest of the snapshot. Cross-source slug aliases live in
 The token-details panel can fetch the largest 200 on-chain holder addresses
 on demand. Each address's share and the combined share use the same total
 market cap as the token details. The current price cancels out, so the share
-is the holder's token balance divided by maximum supply. Coins without a
-verified supply cap still show balances. Results identify the chain and
+is the holder's token balance divided by maximum supply. For coins with
+unlimited supply, shares use circulating market cap and the panel labels
+that basis. Coins whose supply limit is unknown still show balances.
+Results identify the chain and
 contract, since a single-chain address list is not a global holder census.
 Exchange, custody, vesting, burn, and contract addresses remain included.
 Unsupported chains and incomplete rankings are labeled explicitly.
@@ -321,9 +394,15 @@ contract taker-volume periods and show each window's cutoff. Longer spot
 windows fill in as the live stream covers each full window. Confirmed candle
 totals are available while directional data is missing.
 
+The perpetual turnover panel shows the selected exchange's volume multiple to
+two decimal places. It divides the most recent completed UTC day's quote volume
+by the mean of up to 180 preceding full trading days. The server caches a valid
+multiple until the next UTC day.
+
 Use the price monitor embedded in the market page to watch all listed Binance
-USDT perpetual contracts. Inside the strategy panel, **告警记录** and **涨跌预测**
-can be expanded or collapsed independently. The **超阈值记录** navigation opens
+USDT perpetual contracts. **异动监控**, **告警记录**, and **涨跌预测** start
+collapsed on each page load. **告警记录** and **涨跌预测** can be expanded
+independently inside the monitor. The **超阈值记录** navigation opens
 the price-trigger history while monitoring continues. Monitoring starts off by default.
 Turning it off closes the price stream and cancels pending checks.
 Set the window in whole seconds (1 to 300, default 30)
@@ -373,12 +452,9 @@ server-side template in `lib/strategy-notification-events.ts`.
 
 The browser saves the switch, window, price thresholds, and turnover multiple locally. The monitor
 starts a new price window after reconnecting, re-enabling, or changing the duration.
-Alerts include the level and the latest available five-minute long/short
-ratios at the trigger time. The first trigger records the checked USDT
-turnover. Both venues show the
-all-account ratio. Binance shows the top-trader position ratio, and OKX shows
-the top-trader account ratio for the matching USDT perpetual. OKX cells show
-the reason when a contract or its statistics are unavailable.
+Alerts include the level and Binance's latest available five-minute
+all-account long/short ratio and top-trader position ratio at the trigger time.
+The first trigger records the checked USDT turnover.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets
@@ -410,9 +486,10 @@ to serve under a sub-path. `docker-compose.yml` enforces the host protections:
   log lives in the separate proxy container, out of a run's reach.)
 - **`mem_limit` / `cpus` / `pids_limit` + `--init`** → a user can't exhaust host RAM/CPU, fork-bomb it, or orphan processes;
 - **non-root + `no-new-privileges` + `cap_drop: ALL`** → minimal blast radius;
-- **egress allowlist** → the app runs on an internet-less `internal` network; all
-  outbound goes through the `egress-proxy` (squid) sidecar, which permits **only
-  the exchange API domains generated from CCXT** (`proxy/`). Mining pools, C2,
+- **egress allowlist** → the app runs on an internet-less `internal` network. All
+  outbound goes through the `egress-proxy` (squid) sidecar, which permits the
+  exchange API domains generated from CCXT and HTTPS to the exact SwoleCharts,
+  CoinBoss and CryptoHFTData liquidation API hosts (`proxy/`). Mining pools, C2,
   data-exfil endpoints, and the host's neighbor services are all unreachable —
   even via a raw socket, because the app has no other route out;
 - **no inference credential in the container** — the app posts to the endpoint in

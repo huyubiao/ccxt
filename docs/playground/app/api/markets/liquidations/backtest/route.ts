@@ -13,6 +13,6 @@ export async function GET(request: NextRequest) {
     const data = await getLiquidationBacktest(instrument);
     return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch {
-    return NextResponse.json({ error: "清算回测暂不可用。" }, { status: 502 });
+    return NextResponse.json({ error: "强平价带回测暂不可用。" }, { status: 502 });
   }
 }

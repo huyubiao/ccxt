@@ -35,7 +35,7 @@ test("AGT shows a top-100 concentration with the public BSC source", async () =>
   assert.equal(snapshot.rows.length, 100);
   assert.equal(snapshot.rows[0].amount, "50000000");
   assert.equal(snapshot.totalAmount, "2525000000");
-  assert.equal(withHolderMarketCap(snapshot, 5_000_000_000, null).totalMarketCapPercentage, 50.5);
+  assert.equal(withHolderMarketCap(snapshot, { supplyLimit: "capped", maxSupply: 5_000_000_000 }).totalMarketCapPercentage, 50.5);
 });
 
 test("a personal key requests all 200 holders and duplicate addresses are rejected", async () => {

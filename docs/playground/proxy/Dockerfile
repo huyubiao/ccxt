@@ -1,6 +1,5 @@
 # Egress allowlist proxy. The allowlist is generated FROM CCXT's own exchange
-# URLs at build time, so it permits exactly the exchange API hosts (+ OpenRouter
-# for the AI assistant) and denies all other outbound traffic.
+# URLs at build time. Squid also permits HTTPS to the liquidation reference hosts.
 
 # Stage 1 — derive the allowlist from CCXT.
 FROM node:24-trixie-slim AS allowlist

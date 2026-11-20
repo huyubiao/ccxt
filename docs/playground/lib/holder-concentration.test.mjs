@@ -27,12 +27,30 @@ test("cached holder balances are reused with the new denominator", () => {
     totalAmount: "70", circulatingSupply: 100, circulatingPercentage: 70,
     rows: [{ address: "test", label: null, amount: "50", explorerUrl: "", circulatingPercentage: 50 }],
   };
-  const result = withHolderMarketCap(snapshot, 200, 400);
+  const market = { price: 2, circulatingMarketCap: 200, totalMarketCap: 400 };
+  const result = withHolderMarketCap(snapshot, { ...market, supplyLimit: "capped", maxSupply: 200 });
   assert.equal(result.totalMarketCapPercentage, 35);
   assert.equal(result.rows[0].totalMarketCapPercentage, 25);
+  assert.equal(result.circulatingMarketCapPercentage, null);
   assert.equal("circulatingSupply" in result, false);
   assert.equal("circulatingPercentage" in result.rows[0], false);
-  assert.equal(withHolderMarketCap(snapshot, null, null).totalMarketCapPercentage, null);
+
+  const unlimited = withHolderMarketCap(snapshot, { ...market, totalMarketCap: null, supplyLimit: "unlimited", maxSupply: null });
+  assert.equal(unlimited.supplyLimit, "unlimited");
+  assert.equal(unlimited.totalMarketCapPercentage, null);
+  assert.equal(unlimited.circulatingMarketCapPercentage, 70);
+  assert.equal(unlimited.rows[0].circulatingMarketCapPercentage, 50);
+
+  const unknown = withHolderMarketCap(snapshot, { ...market, totalMarketCap: null, supplyLimit: "unknown", maxSupply: null });
+  assert.equal(unknown.totalMarketCapPercentage, null);
+  assert.equal(unknown.circulatingMarketCapPercentage, null);
+  assert.equal(unknown.rows[0].circulatingMarketCapPercentage, null);
+
+  for (const invalidMarket of [{ price: null }, { price: 0 }, { circulatingMarketCap: null }, { circulatingMarketCap: 0 }]) {
+    const missing = withHolderMarketCap(snapshot, { ...market, ...invalidMarket, supplyLimit: "unlimited", maxSupply: null });
+    assert.equal(missing.circulatingMarketCapPercentage, null);
+    assert.equal(missing.rows[0].circulatingMarketCapPercentage, null);
+  }
 });
 
 test("a top-200 total is computed from exact base units before conversion", () => {

@@ -7,12 +7,38 @@ import {
   MINUTE_MS as MINUTE, VOLUME_DELAY_MS, parseAggregateTrade, shortPeriods, sumShortVolume,
   type RecentTrade, type RecentVolumeSeed,
 } from "./short-volume";
+import { VOLUME_BASELINE_DAYS, selectVolumeMultiple } from "./volume-multiple";
 
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const WEEK = 7 * DAY;
 const AGG_TRADE_PAGE_SIZE = 1000;
 const MAX_AGG_TRADE_PAGES = 12;
+const volumeMultiples = new Map<string, { expires: number; pending: Promise<number | null> }>();
+
+function getPerpetualVolumeMultiple(contract: MarketInstrument, now: number) {
+  const key = `${contract.exchange ?? "binance"}:${contract.id}`;
+  const cached = volumeMultiples.get(key);
+  if (cached && cached.expires > now) return cached.pending;
+
+  const day = Math.floor(now / DAY) * DAY;
+  const limit = VOLUME_BASELINE_DAYS + 1;
+  const params = { interval: "1d", startTime: day - limit * DAY, endTime: day - 1, limit };
+  const candles = contract.exchange === "okx" ? getExternalTurnoverCandles(contract, params)
+    : getKlines(contract, params).then((rows) => rows.flatMap((row): [number, number][] => {
+      const open = Number(row[0]);
+      if (Number(row[6]) !== open + DAY - 1 || row[7] == null || !String(row[7]).trim()) return [];
+      return [[open, Number(row[7])]];
+    }));
+  const pending = candles.then((rows) => selectVolumeMultiple(rows, day, contract.onboardAt))
+    .catch(() => null).then((multiple) => {
+      const entry = volumeMultiples.get(key);
+      if (multiple !== null && entry?.pending === pending) entry.expires = day + DAY;
+      return multiple;
+    });
+  volumeMultiples.set(key, { expires: Math.min(now + MINUTE, day + DAY), pending });
+  return pending;
+}
 
 type CandleBlock = {
   start: number;
@@ -40,7 +66,7 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
 
   // Full hours cover the middle of longer windows. Minutes cover their
   // unaligned edges and the 5-minute and 1-hour windows.
-  const [recent, hours, dayEdge, weekEdge, shortWindows, contractTurnover] = await Promise.all([
+  const [recent, hours, dayEdge, weekEdge, shortWindows, contractTurnover, volumeMultiple] = await Promise.all([
     fetchBlock(contract, end - HOUR, end, MINUTE),
     olderBlock(firstWeekHour, lastHour, HOUR),
     olderBlock(end - DAY, firstDayHour, MINUTE),
@@ -53,6 +79,7 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
     contract.exchange === "okx" && contract.kind === "futures"
       ? getOkxContractTurnover(contract.id, end)
       : [],
+    contract.kind === "futures" && historyOnly ? getPerpetualVolumeMultiple(contract, Date.now()) : undefined,
   ]);
   const tail = { ...recent, start: lastHour };
   const history: VolumeWindow[] = [
@@ -67,6 +94,7 @@ export async function getMarketVolume(contract: MarketInstrument, historyOnly = 
     asOf: end,
     shortAsOf,
     convertedFrom: contract.quote === "USDT" ? null : contract.quote,
+    ...(volumeMultiple === undefined ? {} : { volumeMultiple }),
     windows: [
       ...shortWindows,
       ...(external && historyOnly

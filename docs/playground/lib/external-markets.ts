@@ -2,7 +2,6 @@ import ccxt from "ccxt";
 import { binanceUsdM } from "./binance-usdm";
 import { okxTrade } from "./external-trades";
 import type { MarketExchange, MarketInstrument, MarketKind, MarketQuote, VolumeWindow } from "./market-lookup";
-import { readOkxAlertRatio, type OkxAlertRatio } from "./price-alerts";
 import type { RecentTrade } from "./short-volume";
 
 type ExternalExchange = Exclude<MarketExchange, "binance">;
@@ -88,23 +87,6 @@ function number(value: string | number | undefined): number | null {
   return Number.isFinite(result) ? result : null;
 }
 
-export async function getOkxAlertRatios(instId: string, time: number) {
-  const params = { instId, period: "5m", end: time + 1, limit: 2 };
-  async function read(path: string): Promise<OkxAlertRatio> {
-    try {
-      const rows = await okx<unknown>(`rubik/stat/contracts/${path}`, params);
-      return readOkxAlertRatio(rows, time);
-    } catch (error) {
-      return { status: error instanceof ccxt.RateLimitExceeded ? "rate-limited" : "request-failed" };
-    }
-  }
-  const [okxAccounts, okxTopAccounts] = await Promise.all([
-    read("long-short-account-ratio-contract"),
-    read("long-short-account-ratio-contract-top-trader"),
-  ]);
-  return { okxAccounts, okxTopAccounts };
-}
-
 function change(last: number | null, open: number | null) {
   return last != null && open != null && open > 0 ? (last / open - 1) * 100 : null;
 }
@@ -125,9 +107,10 @@ export async function getExternalQuote(pair: MarketInstrument): Promise<MarketQu
 
 export async function getExternalTurnoverCandles(pair: MarketInstrument, params: CandleParams): Promise<[number, number][]> {
   const candles: [number, number][] = [];
-  const bar = params.interval === "1h" ? "1H" : "1m";
+  const daily = params.interval === "1d";
+  const bar = daily ? "1Dutc" : params.interval === "1h" ? "1H" : "1m";
   const olderMinutes = params.interval === "1m" && params.startTime < Date.now() - 23 * 60 * 60000;
-  const path = olderMinutes ? "market/history-candles" : "market/candles";
+  const path = daily || olderMinutes ? "market/history-candles" : "market/candles";
   const pageSize = olderMinutes ? 100 : 300;
   // OKX's cursor is exclusive. Use the final millisecond in the requested block
   // so the candle opening at the next boundary cannot consume a result slot.
@@ -138,7 +121,7 @@ export async function getExternalTurnoverCandles(pair: MarketInstrument, params:
     });
     if (rows.length === 0) break;
     for (const [time, , , , , , , total, confirmed] of rows) {
-      if (confirmed === "1") candles.push([Number(time), Number(total)]);
+      if (confirmed === "1" && total?.trim()) candles.push([Number(time), Number(total)]);
     }
     const oldest = Number(rows.at(-1)?.[0]);
     if (!Number.isFinite(oldest) || oldest >= before || oldest <= params.startTime) break;
