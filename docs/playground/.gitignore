@@ -15,6 +15,9 @@ next-env.d.ts
 # language runtimes — entirely provisioned by scripts/setup-runtimes.sh
 runtime/
 
+# precompiled Rust market service
+market-service/bin/
+
 # misc
 .DS_Store
 *.log

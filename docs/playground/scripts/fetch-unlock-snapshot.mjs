@@ -127,7 +127,7 @@ async function describeToken(identity, calendar, now, request) {
 
 /**
  * @param {{geckoId: string, base: string}} identity
- * @param {{calendar?: object | null, prior?: import("../lib/coin-unlocks").StoredToken | null,
+ * @param {{calendar?: object | null, prior?: object | null,
  *   now?: number, onError?: (name: string) => void,
  *   request: (url: string, headers?: Record<string, string>) => Promise<any>}} options
  */

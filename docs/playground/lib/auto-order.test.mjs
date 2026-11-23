@@ -1,19 +1,6 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
 import { test } from "node:test";
 import { AUTO_ORDER_SYMBOL_LIMIT, AUTO_ORDER_WATCH_MS, createAutoOrderMonitor, marketSpikeStrategy } from "./auto-order.ts";
-
-const lib = new URL("./", import.meta.url);
-const hooks = registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (context.parentURL?.startsWith(lib.href) && /^\.\/[a-z-]+$/.test(specifier)) {
-      return nextResolve(specifier + ".ts", context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
-const { startAutoOrderThread } = await import("./auto-order-thread.ts");
-hooks.deregister();
 
 const spike = { strategy: marketSpikeStrategy, symbol: "BTCUSDT", time: 1000 };
 const trend = { ...spike, strategy: { id: "trend", name: "趋势策略" } };
@@ -134,29 +121,6 @@ test("a qualified order condition renews the window and an open position prevent
   assert.equal(snapshot.status, "starting");
   orders.updateStrategy({ ...strategy, positionOpen: false });
   assert.equal(snapshot.status, "finished");
-});
-
-test("one Node worker keeps each strategy's range independent of ticks before it joined", { timeout: 5000 }, async (t) => {
-  const first = Promise.withResolvers();
-  const both = Promise.withResolvers();
-  const quotes = new Map();
-  const orders = createAutoOrderMonitor(startAutoOrderThread, ({ strategy, quote }) => {
-    if (!quote) return;
-    quotes.set(strategy.id, quote);
-    if (quote.time === 2000) first.resolve();
-    if ([...quotes.values()].filter(({ time }) => time === 3000).length === 2) both.resolve();
-  });
-  t.after(() => orders.stop());
-  orders.submit(spike);
-  orders.observe(spike.symbol, { time: 2000, price: 106 });
-  await first.promise;
-  orders.observe(spike.symbol, { time: 2500, price: 105 });
-  orders.submit(trend);
-  orders.observe(spike.symbol, { time: 1000, price: 90 });
-  orders.observe(spike.symbol, { time: 3000, price: 103 });
-  await both.promise;
-  assert.deepEqual(quotes.get(spike.strategy.id), { time: 3000, price: 103, low: 103, high: 106 });
-  assert.deepEqual(quotes.get(trend.strategy.id), { time: 3000, price: 103, low: 103, high: 103 });
 });
 
 test("order requests keep their strategy identity and only renew the submitting task", (t) => {

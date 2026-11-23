@@ -1,0 +1,19 @@
+{
+  "id": "binance-position-calibrated-2026-11-20",
+  "marketCapSlope": 0.253,
+  "volatilitySlope": -0.361,
+  "leveraged": [
+    { "leverage": 5, "long": 0.001497, "short": 0.002741 },
+    { "leverage": 7, "long": 0.00005, "short": 0.00005 },
+    { "leverage": 10, "long": 0.030976, "short": 0.00005 },
+    { "leverage": 20, "long": 0.007774, "short": 0.00005 },
+    { "leverage": 50, "long": 0.005728, "short": 0.002202 }
+  ],
+  "position": {
+    "lowLeverageShares": {
+      "long": [0.685483, 0.219727, 0.060662, 0.034128],
+      "short": [0.507355, 0.403601, 0.030005, 0.059039]
+    },
+    "collateralMultipliers": [1.3, 1.0, 0.7]
+  }
+}

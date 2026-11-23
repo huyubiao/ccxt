@@ -1,0 +1,31 @@
+[package]
+name = "playground-market-service"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+ccxt-pro = { path = "../../../rust/ccxt-pro", default-features = false, features = ["binanceusdm"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+futures = "0.3"
+hmac = "0.12"
+num-bigint = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+debug = 0

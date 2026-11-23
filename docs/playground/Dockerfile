@@ -4,6 +4,18 @@
 # limits in docker-compose.yml, nothing on the host is reachable. (Code from
 # different users CAN see each other inside the container — acceptable per design.)
 
+FROM rust:1.100.0-trixie AS market-build
+WORKDIR /src
+COPY --from=rust_sdk ccxt-common ./rust/ccxt-common
+COPY --from=rust_sdk ccxt-base ./rust/ccxt-base
+COPY --from=rust_sdk ccxt-pro ./rust/ccxt-pro
+WORKDIR /src/docs/playground
+COPY market-service/Cargo.toml market-service/Cargo.lock ./market-service/
+COPY market-service/src ./market-service/src
+COPY lib/binance-position-calibration.json lib/coin-source-aliases.json lib/coin-unlock-snapshot.json lib/coin-issuance-rules.json lib/coin-staking-rules.json ./lib/
+COPY scripts/reviewed-unlocks.json ./scripts/
+RUN cargo build --release --locked --manifest-path market-service/Cargo.toml
+
 # --- Java: resolve the ccxt jar set in a THROWAWAY stage so Maven and its
 # ~/.m2 cache never ship in the final image (runtime needs only the JDK) ---
 FROM node:24-trixie AS java-libs
@@ -112,6 +124,7 @@ ENV NEXT_BASE_PATH=${NEXT_BASE_PATH}
 
 RUN npm run build
 
+COPY --from=market-build /src/docs/playground/market-service/target/release/playground-market-service ./market-service/bin/
 ENV NODE_ENV=production PORT=3000
 EXPOSE 3000
-CMD ["npm", "run", "start"]
+CMD ["node", "scripts/start-rust-markets.mjs", "--production"]

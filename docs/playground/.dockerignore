@@ -3,9 +3,12 @@ node_modules
 .next
 .next-dev
 runtime
+market-service/target
+market-service/bin
 
 # secrets must never be baked into the image — passed at runtime via env
 .env.local
+.env
 .env*.local
 .cache/strategy-notifications/
 .cache/market-monitor/

@@ -5,7 +5,7 @@ import { apiUrl } from "@/lib/basePath";
 import { formatMarketAmount, formatMarketPriceRange, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import { readMarketResponse } from "@/lib/market-response";
 import {
-  LIQUIDATION_INTERVAL_MS, LIQUIDATION_REFRESH_MS, LIQUIDATION_RISK_BAND_SHARES, MARK_RANGE_MIN_COUNT, positionExitScenario,
+  LIQUIDATION_INTERVAL_MS, LIQUIDATION_REFRESH_MS, LIQUIDATION_RISK_BAND_SHARES, MARK_RANGE_MIN_COUNT,
   type LiquidationLevels, type LiquidationRiskBand,
 } from "@/lib/liquidation-levels";
 import {
@@ -30,7 +30,8 @@ function displayCoverage(quantity: number, openInterest: number) {
   return share > 0 && share < 0.0001 ? "<0.01%" : weightPercent.format(share);
 }
 
-function LiquidationModelParameters({ weighting }: { weighting: LiquidationLevels["leverageWeighting"] }) {
+function LiquidationModelParameters({ leverageWeighting: weighting, positionExitScenario }:
+  Pick<LiquidationLevels, "leverageWeighting" | "positionExitScenario">) {
   const { capitalization, marketCapBand, volatilityLevel, volatilityFactor, volatilityCounts, factor, weights, thresholds } = weighting;
   const thresholdIndex = volatilityLevel - 2;
   const volatilityBasis = volatilityCounts === null ? "近 24 小时样本不足，使用默认档"
@@ -370,7 +371,8 @@ export default function CoinLiquidations({ symbol }: { symbol: string }) {
           : coverage ? "当前持仓总量为零。" : "暂无数据。"}</p>
         {coverage && <p><strong>图外的仓位</strong> · 多头 {formatMarketAmount(Math.max(0, coverage.openInterestQuantity - coverage.longQuantity))} 枚 · 空头 {formatMarketAmount(Math.max(0, coverage.openInterestQuantity - coverage.shortQuantity))} 枚。图中的仓位来自最近行情数据推算。</p>}
         <LiquidationChart data={data} />
-        <details><summary>查看仓位模型参数</summary><LiquidationModelParameters weighting={data.leverageWeighting} /></details>
+        <details><summary>查看仓位模型参数</summary><LiquidationModelParameters leverageWeighting={data.leverageWeighting}
+          positionExitScenario={data.positionExitScenario} /></details>
       </>}
       <LiveLiquidationPanel windows={windows} status={streamStatus} marksUnavailable={marksUnavailable} />
     </details>

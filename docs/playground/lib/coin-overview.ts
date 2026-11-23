@@ -64,12 +64,6 @@ export type Tokenomics = {
   updatedAt: number;
 };
 
-export function positiveNumber(value: unknown): number | null {
-  if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : null;
-}
-
 export type CoinOverview = {
   market: CoinValuation | null;
   unlock: CoinUnlock | null;

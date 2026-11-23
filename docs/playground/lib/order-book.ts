@@ -11,7 +11,6 @@ export type OrderBookSnapshot = {
 };
 
 export const BOOK_REFRESH_MS = 5_000;
-export const BOOK_MAX_AGE_MS = 15_000;
 
 function bookNotional(levels: BookLevel[]) {
   return levels.reduce((sum, [price, quantity]) => sum + price * quantity, 0);

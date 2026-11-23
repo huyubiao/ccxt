@@ -9,7 +9,7 @@ import {
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
 import {
-  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, MIN_ALERT_SECONDS, TURNOVER_BASELINE_MINUTES,
+  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, MIN_ALERT_SECONDS,
   getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
   recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries, spikeKey,
   type AlertTurnover, type AlertVolume, type DirectionalThresholds,

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
-import type { StrategyNotificationEvent } from "@/lib/strategy-notification-events";
-import type { NotificationConfigStatus, NotificationDelivery } from "@/lib/strategy-notifications";
+import type { NotificationConfigStatus, NotificationDelivery, StrategyNotificationEvent } from "@/lib/strategy-notification-events";
 
 type DeliveryStatus = NotificationDelivery | "invalid-event" | "forbidden" | "unavailable";
 type SettingsChange = { webhook: string; secret: string } | { enabled: boolean };

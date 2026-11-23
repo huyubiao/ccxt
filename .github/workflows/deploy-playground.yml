@@ -18,6 +18,9 @@ on:
     branches: [master]
     paths:
       - 'docs/playground/**'
+      - 'rust/ccxt-common/**'
+      - 'rust/ccxt-base/**'
+      - 'rust/ccxt-pro/**'
       - '.github/workflows/deploy-playground.yml'
   workflow_dispatch:
 
@@ -46,11 +49,13 @@ jobs:
       CANARY_IP: 172.31.0.11
       BASE_PATH: /playground
     steps:
-      # Both docker build contexts are under docs/playground/ — the ~490MB of ts/, dist/ and the
-      # six generated language trees are never read here.
       - uses: actions/checkout@v6
         with:
-          sparse-checkout: docs/playground
+          sparse-checkout: |
+            docs/playground
+            rust/ccxt-common
+            rust/ccxt-base
+            rust/ccxt-pro
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -71,6 +76,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: docs/playground
+          build-contexts: rust_sdk=./rust
           platforms: linux/amd64
           push: true
           # All five runnable languages (TS/Python/PHP/C#/Go) are enabled. The Go
@@ -235,6 +241,12 @@ jobs:
             for i in $(seq 1 30); do curl -fsS -o /dev/null "$SMOKE_BASE" 2>/dev/null && break; sleep 2; done
             html=$(curl -fsS --max-time 25 "$SMOKE_BASE") || { echo "smoke: homepage not 200"; return 1; }
             echo "$html" | grep -q "CCXT Playground" || { echo "smoke: homepage content missing"; return 1; }
+            local market_status
+            if ! market_status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "${SMOKE_BASE}/api/markets/ticker?market=unsupported"); then
+              echo "smoke: Rust market API request failed"
+              return 1
+            fi
+            [ "$market_status" = 400 ] || { echo "smoke: unexpected Rust market status $market_status"; return 1; }
             smoke_lang '{"language":"ts","code":"console.log(6*7)"}'               || return 1
             smoke_lang '{"language":"python","code":"print(6*7)"}'                 || return 1
             smoke_lang '{"language":"php","code":"<?php echo 6*7;"}'               || return 1

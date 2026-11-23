@@ -29,10 +29,60 @@ code for you.
 
 ## Quick start
 
-On Windows, double-click `start-playground.cmd` at the repository root. When
-the server is ready, open <http://127.0.0.1:3000/>. From a terminal, pass a
-different port as the first argument if needed, for example
-`start-playground.cmd 3001`.
+On Windows, double-click `start-playground.cmd` at the repository root. It
+requires Node.js 24 or later with npm for the first dependency installation.
+You can also extract the Windows Node.js ZIP so that `node.exe` and
+`node_modules/npm` are directly under `docs/playground/runtime/node`.
+When the server is ready, open <http://127.0.0.1:3000/>. Use
+`start-playground.cmd 3001` for a different web port. The older `rust` argument
+also starts the Rust service.
+
+### Rust market backend
+
+On Windows x64 the launcher first looks for
+`docs/playground/market-service/bin/win32-x64/playground-market-service.exe`.
+The release executable embeds its Rust and C runtime dependencies. A matching
+binary also works with the `monitor` command. A source checkout can build the
+backend automatically when the executable is absent, using a current stable Rust
+toolchain and Windows C/C++ build tools. Set `PLAYGROUND_BUILD_RUST=1` before
+launching to rebuild after changing the Rust source.
+
+To produce a Windows x64 release from the repository root with PowerShell:
+
+```powershell
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
+cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path docs/playground/market-service/Cargo.toml
+New-Item -ItemType Directory -Force docs/playground/market-service/bin/win32-x64 | Out-Null
+Copy-Item docs/playground/market-service/target/x86_64-pc-windows-msvc/release/playground-market-service.exe docs/playground/market-service/bin/win32-x64/
+```
+
+The launcher assigns Rust an available loopback port and passes its address
+and a fresh internal token to Next.js. It reuses existing SQLite monitoring
+records and DingTalk settings. Stop any monitor from an earlier version before
+starting the Rust service against the same database.
+
+You can also run the services separately from `docs/playground`. Set
+`PLAYGROUND_LOCAL_SETTINGS=1` and the same `PLAYGROUND_MARKET_SERVICE_TOKEN`
+for both processes. Generate the token with
+`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`
+and keep it in the server environment. Run
+`cargo run --locked --manifest-path market-service/Cargo.toml` in one terminal.
+In the other, set `PLAYGROUND_MARKET_SERVICE_URL=http://127.0.0.1:3101` and run
+`npm run dev -- --hostname 127.0.0.1`. If Node uses an HTTP proxy, include
+`127.0.0.1` in its `NO_PROXY` list. The Rust service reads `HTTPS_PROXY`,
+`PLAYGROUND_MONITOR_DB`, and DingTalk environment values from its own process.
+The live Binance stream supports direct TLS and unauthenticated HTTP CONNECT
+proxies, including the Windows system proxy used by the launcher.
+
+Next.js forwards market API requests and strategy notifications to Rust. The
+Rust service handles market directories,
+quotes, order books, funding, volume, alert context, liquidation risk, market
+caps, token fundamentals, holder research, and the background strategy monitor.
+The Binance USDⓈ-M REST requests use the repository's CCXT Rust SDK. The
+background monitor reads the original public mini-ticker frames over Tokio.
+Market APIs return HTTP 503 when the Rust service is unavailable or its URL
+is missing. Next.js serves the browser interface and multi-language code
+runner.
 
 In development, source changes are applied by Fast Refresh. Development
 uses `.next-dev` and production builds use `.next`, so running a production
@@ -43,7 +93,7 @@ cd docs/playground
 npm install
 npm run setup-runtimes        # optional but recommended (see below)
 cp .env.example .env.local    # set PLAYGROUND_AI_URL for the AI panel
-npm run dev                   # http://localhost:3000
+node scripts/start-rust-markets.mjs  # http://127.0.0.1:3000
 ```
 
 The local homepage lists coins with an active USDT-margined perpetual
@@ -364,9 +414,10 @@ USDT perpetual contracts. **异动监控** and **告警记录** start collapsed 
 each page load. Monitoring starts off by default.
 Confirm the prompt after switching the strategy on or off. Turning it off
 closes the price stream and cancels pending checks.
-In local mode, turn on **异动监控 → 启用策略** to launch an independent process
-automatically. The process keeps monitoring after the browser or the local
-web server is closed. Turn off the same switch to stop it. On the public
+In local mode, turn on **异动监控 → 启用策略** to activate the Rust monitor.
+It keeps monitoring after the browser closes, for as long as the launcher
+is running. To run the saved rule independently of the web app, use
+`start-playground.cmd monitor` or `npm run monitor`. On the public
 Playground, keep the market page open for browser-based monitoring.
 Set the window in whole seconds (10 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
@@ -427,10 +478,10 @@ Use **暂停推送** or **恢复推送** for the server-wide robot setting.
 Existing `DINGTALK_WEBHOOK_URL` and
 `DINGTALK_WEBHOOK_SECRET` values act as a fallback until a robot is saved on
 the local page. To enable editing when starting the server manually, set `PLAYGROUND_LOCAL_SETTINGS=1`
-and bind Next.js to `127.0.0.1`.
-Server-side strategies can call `strategyNotifier.send({ title, lines })` from
-`lib/strategy-notifications.ts`. Browser strategies add a typed event and a
-server-side template in `lib/strategy-notification-events.ts`.
+and bind Next.js to `127.0.0.1`. Browser requests to send notifications
+also require local settings mode.
+Templates, delivery, and Webhook signing are implemented in the Rust service.
+The browser submits typed events using `lib/strategy-notification-events.ts`.
 
 The local monitor stores its rule, price triggers, alerts and latest DingTalk
 delivery attempts in `.cache/market-monitor/monitor.sqlite`. Both processes
@@ -486,6 +537,7 @@ from **Examples…**.
 Running user code directly on a host is unsafe (see **Sandboxing & safety**).
 The Docker setup makes the **container the trust boundary** — user code can only
 touch the container filesystem; the host is unreachable.
+Use Docker Compose 2.17 or newer for the named CCXT Rust SDK build context.
 
 ```bash
 cd docs/playground
@@ -493,7 +545,8 @@ PLAYGROUND_AI_URL=http://<host>:<port>/v1/chat/completions docker compose up --b
 # → http://localhost:3000
 ```
 
-The image bundles every runtime (Node, Python, PHP, Go, .NET) with CCXT
+The image starts the compiled Rust market service alongside Next.js. It
+bundles every runner runtime (Node, Python, PHP, Go, .NET) with CCXT
 pre-installed and the Go/C# build caches **warmed at build time**, so first runs
 are fast. Pass `--build-arg PLAYGROUND_DISABLED=go` (and/or `csharp`) to keep a
 compiled language **install-only** — an escape hatch for a small host where
@@ -550,7 +603,8 @@ the container's `/etc/hosts` and a non-root `/home/playground`, and a crash
 > **Build on the target architecture.** CCXT's Python wheels crash (`SIGILL`) under
 > Docker Desktop on Apple Silicon (arm64) — Python is skipped there and the build
 > continues. On a normal **amd64 Linux server** (or native arm64 hardware) all
-> runtimes work; build there, or `docker build --platform linux/amd64`.
+> runtimes work. To build directly from `docs/playground`, run
+> `docker build --platform linux/amd64 --build-context rust_sdk=../../rust .`.
 
 ## Production: docs.ccxt.com/playground
 

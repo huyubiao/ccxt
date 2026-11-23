@@ -31,7 +31,7 @@ async function collect(dir: string, libs: Lib[]) {
   }
 }
 
-function buildEntry(exchanges: string[], version: string): string {
+function buildEntry(exchanges: string[]): string {
   const ids = exchanges.map((id) => `  ${JSON.stringify(id)}: ExchangeClass;`).join("\n");
   return `export * from "./src/base/types.js";
 export { Exchange } from "./src/base/Exchange.js";
@@ -67,7 +67,7 @@ export async function GET() {
       type: "module",
       types: "./js/ccxt.d.ts",
     });
-    cache = { libs, entry: buildEntry(exchanges, version), packageJson, version };
+    cache = { libs, entry: buildEntry(exchanges), packageJson, version };
   }
   return NextResponse.json(cache, {
     headers: { "Cache-Control": "public, max-age=3600" },

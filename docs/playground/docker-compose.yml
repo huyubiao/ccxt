@@ -19,6 +19,8 @@ services:
   playground:
     build:
       context: .
+      additional_contexts:
+        rust_sdk: ../../rust
       args:
         NEXT_BASE_PATH: ${NEXT_BASE_PATH:-}
         PLAYGROUND_DISABLED: ${PLAYGROUND_DISABLED:-}
