@@ -5,13 +5,16 @@ import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
 import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import {
-  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, TURNOVER_BASELINE_MINUTES,
+  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, MIN_ALERT_SECONDS, TURNOVER_BASELINE_MINUTES,
   getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
-  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries,
+  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries, spikeKey,
   type AlertMarketContext, type AlertRatio, type AlertTurnover, type DirectionalThresholds,
   type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries,
 } from "@/lib/price-alerts";
 import SpikeForecastPanel from "./spike-forecast-panel";
+import { useBackgroundMonitor } from "./use-background-monitor";
+import type { BackgroundRecord, BackgroundRule, DeliveryState } from "@/lib/background-monitor-types";
+import { MAX_FORECAST_AGE_MS } from "@/lib/spike-forecast";
 import SpikeRecords, { readSpikeRecords, saveSpikeRecords, SPIKE_RECORD_LIMIT, type SpikeRecord } from "./spike-records";
 import { useSpikeForecasts } from "./use-spike-forecasts";
 import { useStrategyNotifications } from "./use-strategy-notifications";
@@ -37,6 +40,7 @@ const formatTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeSt
 
 type Alert = SpikeRecord & {
   context?: AlertMarketContext | "request-failed" | "queue-skipped" | "monitor-stopped";
+  delivery?: BackgroundRecord;
 };
 type TurnoverJob = {
   record: SpikeRecord & { requiredMultiple: number };
@@ -64,6 +68,21 @@ const alertContextMessages = {
   "monitor-stopped": "监控已停止，行情补查取消",
 };
 
+const deliveryLabels: Record<DeliveryState, string> = {
+  disabled: "未开启推送", queued: "等待推送", sending: "正在推送", sent: "已送达", duplicate: "重复已跳过",
+  "rate-limited": "钉钉限流", failed: "发送失败", paused: "机器人已暂停", unconfigured: "机器人未配置",
+  invalid: "配置或内容无效", "config-unavailable": "读取配置失败", unknown: "送达结果未知",
+};
+
+function Delivery({ record }: { record?: BackgroundRecord }) {
+  if (!record) return "—";
+  const { delivery, attempts, lastAttempt, lastResult } = record;
+  return <>{deliveryLabels[delivery]}{attempts > 0 && <small>
+    第 {attempts} 次{lastAttempt && ` · ${formatTime.format(lastAttempt)}`}
+    {lastResult && lastResult !== delivery && ` · 上次${deliveryLabels[lastResult]}`}
+  </small>}</>;
+}
+
 export default function MarketMonitor({ contracts, coinCount, directoryError, showRecords }: {
   contracts: readonly MarketInstrument[] | undefined;
   coinCount: number | null;
@@ -84,6 +103,10 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [spikes, setSpikes] = useState<SpikeRecord[]>([]);
   const [recordsReady, setRecordsReady] = useState(false);
+  const background = useBackgroundMonitor();
+  const server = background.mode === "local";
+  const canEdit = background.mode !== "loading" && !background.saving;
+  const serverRule = background.data?.configured ? background.data.rule : null;
   const { records: forecasts, addAlerts: addForecastAlerts } = useSpikeForecasts();
   const strategyNotifications = useStrategyNotifications();
   const { config: dingTalkConfig, configMessage: dingTalkConfigMessage, notifyStrategy } = strategyNotifications;
@@ -94,10 +117,61 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   const activeRule = useRef<DirectionalThresholds & { seconds: number; turnoverMultiple: number }>({
     ...DEFAULT_THRESHOLDS, seconds: DEFAULT_ALERT_SECONDS, turnoverMultiple: DEFAULT_TURNOVER_MULTIPLE,
   });
-  const symbols = useMemo(() => enabled && contracts ? new Set(contracts.map(({ id }) => id)) : null, [enabled, contracts]);
+  const symbols = useMemo(() => background.mode === "browser" && enabled && contracts ? new Set(contracts.map(({ id }) => id)) : null,
+    [background.mode, enabled, contracts]);
   const activeSymbols = useRef(symbols);
   const hasSymbols = !!symbols?.size;
   const observedCoins = contracts ? getContractCoins(contracts, observedSymbols).size : 0;
+  const strategyEnabled = server ? background.data?.rule.enabled === true : background.mode === "browser" && enabled;
+  const strategyNotify = server && serverRule ? serverRule.notify : dingTalkEnabled;
+  const displayedThresholds = serverRule ?? thresholds;
+  const displayedSeconds = serverRule?.seconds ?? seconds;
+  const displayedMultiple = serverRule?.turnoverMultiple ?? turnoverMultiple;
+  const serverSpikes = background.data?.spikes;
+  const serverRecords = background.data?.records;
+  const displayedSpikes = useMemo(() => {
+    if (!serverSpikes) return spikes;
+    const rows = new Map(spikes.map((row) => [spikeKey(row), row]));
+    for (const row of serverSpikes) rows.set(spikeKey(row), row);
+    return [...rows.values()].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT);
+  }, [serverSpikes, spikes]);
+  const displayedAlerts = useMemo<Alert[]>(() => {
+    if (!serverRecords) return alerts;
+    const byKey = new Map(serverSpikes?.map((row) => [spikeKey(row), row]));
+    return serverRecords.map((delivery) => {
+      const row = byKey.get(spikeKey(delivery.event));
+      return { requiredMultiple: null, ...row, ...delivery.event, status: "alerted", delivery,
+        context: delivery.event.context ?? undefined };
+    });
+  }, [serverRecords, serverSpikes, alerts]);
+
+  const forecasted = useRef(new Set<string>());
+  useEffect(() => {
+    if (!serverRecords?.length) return;
+    const now = Date.now();
+    const current = new Set(serverRecords.map(({ id }) => id));
+    for (const id of forecasted.current) {
+      if (!current.has(id)) forecasted.current.delete(id);
+    }
+    const recent = serverRecords.filter(({ event, id }) => now - event.time <= MAX_FORECAST_AGE_MS && !forecasted.current.has(id));
+    if (!recent.length) return;
+    for (const { id } of recent) forecasted.current.add(id);
+    addForecastAlerts(recent.map(({ event }) => event));
+  }, [serverRecords, addForecastAlerts]);
+
+  const storedUp = serverRule?.up;
+  const storedDown = serverRule?.down;
+  const storedSeconds = serverRule?.seconds;
+  const storedMultiple = serverRule?.turnoverMultiple;
+  useEffect(() => {
+    if (storedUp === undefined || storedDown === undefined || storedSeconds === undefined || storedMultiple === undefined) return;
+    setUpSelected(storedUp !== null);
+    setDownSelected(storedDown !== null);
+    if (storedUp !== null) setUpInput(String(storedUp));
+    if (storedDown !== null) setDownInput(String(-storedDown));
+    setSecondsInput(String(storedSeconds));
+    setTurnoverInput(String(storedMultiple));
+  }, [storedUp, storedDown, storedSeconds, storedMultiple]);
 
   useLayoutEffect(() => {
     activeSymbols.current = symbols;
@@ -409,9 +483,13 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   }, [hasSymbols, addForecastAlerts, notifyStrategy]);
 
   function toggleDingTalkNotifications() {
-    const next = !notifyDingTalk.current;
+    const next = !strategyNotify;
     if (next && dingTalkConfig !== "ready") {
       document.getElementById("dingtalk-heading")?.focus();
+      return;
+    }
+    if (server) {
+      saveServerRule({ notify: next });
       return;
     }
     notifyDingTalk.current = next;
@@ -420,12 +498,28 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   }
 
   function toggleMonitoring(next: boolean) {
+    if (!canEdit || next === strategyEnabled) return;
+    const message = next
+      ? server
+        ? "确定启用异动监控？启用后将按当前规则监控行情，关闭网页后仍会继续。"
+        : "确定启用异动监控？启用后将按当前规则监控行情，请保持网页打开。"
+      : "确定关闭异动监控？关闭后将停止监控，并取消待处理的成交额核验。";
+    if (!window.confirm(message)) return;
+    if (server) {
+      saveServerRule({ enabled: next });
+      return;
+    }
     setEnabled(next);
     try {
       localStorage.setItem(ENABLED_STORAGE_KEY, String(next));
     } catch {
       // The current session still uses the switch state.
     }
+  }
+
+  function saveServerRule(change: Partial<BackgroundRule>) {
+    const rule = serverRule ?? { ...activeRule.current, enabled: strategyEnabled, notify: strategyNotify };
+    void background.save({ ...rule, ...change });
   }
 
   function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -441,6 +535,10 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
     setInvalid(error);
     if (error || nextSeconds === null || nextMultiple === null) return;
     const next: DirectionalThresholds = { up, down: downValue === null ? null : -Math.abs(downValue) };
+    if (server) {
+      saveServerRule({ ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple });
+      return;
+    }
     activeRule.current = { ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple };
     setThresholds(next);
     setSeconds(nextSeconds);
@@ -454,21 +552,32 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
     }
   }
 
+  const worker = background.data?.worker;
+  const monitoringStatus = background.mode === "loading" ? "正在读取监控状态"
+    : !strategyEnabled ? "监控已停止"
+    : server ? worker === "connected" ? "行情已连接 · 关闭网页后继续"
+      : worker === "offline" ? "监控进程离线，正在重试" : "正在连接行情"
+    : !symbols ? "正在准备监控名单" : !hasSymbols ? "暂无可交易币种"
+      : `${online ? "行情已连接" : "正在连接行情"} · 已收到 ${observedCoins} 个币种的行情`;
+
   const strategy = (
     <details className={styles.monitorFeature}>
       <summary className={styles.monitorSummary}>
-        <h3>异动监控 <small>{enabled ? "已启动 · 折叠后继续监控" : "已停止"}</small></h3>
+        <h3>异动监控 <small>{monitoringStatus}</small></h3>
       </summary>
       <div className={styles.monitorBody}>
         <div className={styles.monitorHeading}>
           <label className={styles.monitorSwitch}>
-            <input type="checkbox" role="switch" checked={enabled} onChange={(event) => toggleMonitoring(event.target.checked)} />
+            <input type="checkbox" role="switch" checked={strategyEnabled} disabled={!canEdit}
+              onChange={(event) => toggleMonitoring(event.target.checked)} />
             启用策略
           </label>
+          {background.saving && <span role="status">正在保存策略…</span>}
         </div>
+        {background.error && <p role="alert">{background.error}</p>}
         <section className={`${styles.result} ${styles.monitorSettings}`} aria-label="告警设置">
           <form className={styles.monitorForm} onSubmit={saveSettings}>
-            <label htmlFor="alert-seconds">时间窗口（1–{MAX_ALERT_SECONDS} 秒）</label>
+            <label htmlFor="alert-seconds">时间窗口（{MIN_ALERT_SECONDS}–{MAX_ALERT_SECONDS} 秒）</label>
             <input id="alert-seconds" inputMode="numeric" value={secondsInput} onChange={(event) => setSecondsInput(event.target.value)}
               aria-invalid={invalid === "seconds"} aria-describedby="alert-window-help" placeholder={String(DEFAULT_ALERT_SECONDS)} />
             <label className={styles.monitorSwitch}>
@@ -486,19 +595,19 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
             <label htmlFor="alert-turnover-multiple">告警成交额倍数</label>
             <input id="alert-turnover-multiple" inputMode="decimal" value={turnoverInput} onChange={(event) => setTurnoverInput(event.target.value)}
               aria-invalid={invalid === "turnover"} aria-describedby="alert-turnover-help alert-turnover-baseline" />
-            <button type="submit">保存设置</button>
-            <button type="button" disabled={!dingTalkEnabled && dingTalkConfig === "checking"}
+            <button type="submit" disabled={!canEdit}>保存设置</button>
+            <button type="button" disabled={!canEdit || (!strategyNotify && dingTalkConfig === "checking")}
               aria-describedby="market-spike-dingtalk-status" onClick={toggleDingTalkNotifications}>
-              {dingTalkEnabled ? "停止钉钉通知" : "开启钉钉通知"}
+              {strategyNotify ? "停止钉钉通知" : "开启钉钉通知"}
             </button>
           </form>
           <p id="market-spike-dingtalk-status" role="status">
-            异动监控的钉钉通知{dingTalkEnabled ? "已开启" : "已关闭"}。
-            {dingTalkConfig === "ready" ? (dingTalkEnabled ? "确认的告警将推送到钉钉群机器人。" : "")
+            异动监控的钉钉通知{strategyNotify ? "已开启" : "已关闭"}。
+            {dingTalkConfig === "ready" ? (strategyNotify ? "确认的告警将推送到钉钉群机器人。" : "")
               : dingTalkConfig === "checking" ? dingTalkConfigMessage
                 : `${dingTalkConfigMessage}。请到「钉钉推送」查看。`}
           </p>
-          {invalid === "seconds" && <p role="alert">请输入 1 至 {MAX_ALERT_SECONDS} 之间的整数秒数。</p>}
+          {invalid === "seconds" && <p role="alert">请输入 {MIN_ALERT_SECONDS} 至 {MAX_ALERT_SECONDS} 之间的整数秒数。</p>}
           {invalid === "directions" && <p role="alert">请至少勾选上涨幅度或下跌幅度。</p>}
           {invalid === "up" && <p role="alert">上涨阈值须至少为 {MIN_ALERT_PERCENT}%。</p>}
           {invalid === "down" && <p role="alert">下跌幅度须至少为 {MIN_ALERT_PERCENT}%，且小于 100%。</p>}
@@ -511,10 +620,10 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
           </div>
           {coinCount !== null && <p>可交易币种共 {coinCount} 个</p>}
           <p role="status">
-            当前设置 {seconds} 秒 / {[thresholds.up !== null ? `上涨 ${formatPercent.format(thresholds.up)}%` : null, thresholds.down !== null ? `下跌 ${formatPercent.format(thresholds.down)}%` : null].filter(Boolean).join(" / ")} / 成交额 ≥ {turnoverMultiple} 倍 · {enabled
-              ? !symbols ? "正在准备监控名单" : !hasSymbols ? "暂无可交易币种"
-                : `${online ? "行情已连接" : "正在连接行情"} · 已收到 ${observedCoins} 个币种的行情`
-              : "监控已停止"}
+            当前设置 {displayedSeconds} 秒 / {[
+              displayedThresholds.up !== null ? `上涨 ${formatPercent.format(displayedThresholds.up)}%` : null,
+              displayedThresholds.down !== null ? `下跌 ${formatPercent.format(displayedThresholds.down)}%` : null,
+            ].filter(Boolean).join(" / ")} / 成交额 ≥ {displayedMultiple} 倍 · {monitoringStatus}
           </p>
           {directoryError && <p role="status">合约列表同步失败，正在重试。</p>}
           <div className={styles.monitorHelp}>
@@ -522,26 +631,30 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
             <p>例如窗口设为 30 秒、涨幅设为 5%。价格从 100 涨到 108，成交额达标就报 1 级。下一档从 105 算，再涨 5% 到 110.25 就报 2 级。如果一口气涨到 116，可以直接报 3 级。</p>
             <p>每次升级都会重新计时。窗口内没到下一级，就重新找下一轮异动。上涨和下跌分别计级。</p>
           </div>
-          <p>监控币种深度调研名单里的全部币安 USDT 本位永续合约。请保持行情页打开，切换币种或交易所时监控会继续运行。</p>
+          <p>监控币种深度调研名单里的全部币安 USDT 本位永续合约。{server
+            ? "启用后自动启动独立进程，关闭网页后继续监控。"
+            : background.mode === "browser" ? "请保持行情页打开。" : ""}</p>
         </section>
         <details className={styles.turnover}>
           <summary className={styles.monitorSectionSummary}><h4>告警记录 <span>最近 100 条</span></h4></summary>
-          <p role="status">{alerts.length ? `最新告警 ${alerts[0].symbol} ${alerts[0].level} 级 · ${formatAlertChange.format(alerts[0].change)}%` : "暂无告警。"}</p>
-          {alerts.length > 0 && <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
+          <p role="status">{displayedAlerts.length ? `最新告警 ${displayedAlerts[0].symbol} ${displayedAlerts[0].level} 级 · ${formatAlertChange.format(displayedAlerts[0].change)}%` : "暂无告警。"}</p>
+          {displayedAlerts.length > 0 && <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
             <table className={styles.alertTable}>
               <thead><tr>
                 <th scope="col">交易对</th><th scope="col">告警级别</th><th scope="col">触发时间</th><th scope="col">参考价 (USDT)</th>
                 <th scope="col">触发价 (USDT)</th><th scope="col">涨跌幅</th><th scope="col">阈值</th><th scope="col">窗口 (秒)</th>
                 <th scope="col">窗口成交额 (USDT)</th>
                 <th scope="col">币安全体账户多空比/大户多空持仓比</th>
+                {server && <th scope="col">钉钉送达</th>}
               </tr></thead>
               <tbody>
-                {alerts.map((alert) => {
+                {displayedAlerts.map((alert) => {
                   const { context } = alert;
-                  return <tr key={`${alert.symbol}:${alert.time}:${alert.threshold}`}>
+                  return <tr key={spikeKey(alert)}>
                     <th scope="row">{alert.symbol}</th>
                     <td>{alert.level} 级</td>
-                    <td><time dateTime={new Date(alert.time).toISOString()}>{formatTime.format(alert.time)}</time></td>
+                    <td><time dateTime={new Date(alert.time).toISOString()}>{formatTime.format(alert.time)}</time>
+                      {alert.delivery && <small>确认 {formatTime.format(alert.delivery.confirmedAt)}</small>}</td>
                     <td title={fullMarketNumber.format(alert.previous)}>{formatPrice(alert.previous)}</td>
                     <td title={fullMarketNumber.format(alert.price)}>{formatPrice(alert.price)}</td>
                     <td className={alert.change < 0 ? styles.sell : styles.buy}>{formatAlertChange.format(alert.change)}%</td>
@@ -549,19 +662,21 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
                     <td>{alert.seconds}</td>
                     <td>{alert.volume?.turnover != null && alert.volume.multiple != null
                       ? <>{formatMarketAmount(alert.volume.turnover)} <small>{formatRatio.format(alert.volume.multiple)} 倍</small></>
-                      : "升级告警"}</td>
+                      : alert.requiredMultiple === null && !alert.delivery ? "升级告警" : "—"}</td>
                     <td className={styles.alertRatios}>
-                      {context === undefined ? "正在补充多空比…" : typeof context === "string" ? <small>{alertContextMessages[context]}</small> : <>
+                      {context === undefined ? alert.delivery && Date.now() - alert.delivery.confirmedAt > 60_000
+                        ? "—" : "正在补充多空比…" : typeof context === "string" ? <small>{alertContextMessages[context]}</small> : <>
                         <div>全体 <Ratio data={context.binanceAccounts} /></div>
                         <div>大户 <Ratio data={context.binancePositions} /></div>
                       </>}
                     </td>
+                    {server && <td><Delivery record={alert.delivery} /></td>}
                   </tr>;
                 })}
               </tbody>
             </table>
           </div>}
-          {alerts.length > 0 && <p>多空比使用告警时币安最近一期 5 分钟统计。币安大户按保证金余额取前 20%。</p>}
+          {displayedAlerts.length > 0 && <p>多空比使用告警时币安最近一期 5 分钟统计。币安大户按保证金余额取前 20%。</p>}
         </details>
         <SpikeForecastPanel records={forecasts} />
       </div>
@@ -575,7 +690,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
         <DingTalkSettings {...strategyNotifications} />
         {strategy}
       </section>
-      {showRecords && <SpikeRecords records={spikes} />}
+      {showRecords && <SpikeRecords records={displayedSpikes} />}
     </>
   );
 }

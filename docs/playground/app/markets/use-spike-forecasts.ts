@@ -128,7 +128,8 @@ export function useSpikeForecasts() {
         const key = keyOf(candidate);
         if (Math.abs(change) > Math.abs(unique.get(key)?.change ?? 0)) unique.set(key, candidate);
       }
-      return [...unique.values(), ...previous].slice(0, FORECAST_HISTORY_LIMIT);
+      for (const row of previous) unique.set(keyOf(row), row);
+      return [...unique.values()].sort((a, b) => b.time - a.time).slice(0, FORECAST_HISTORY_LIMIT);
     });
   }, []);
 

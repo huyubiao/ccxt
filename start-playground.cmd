@@ -4,14 +4,20 @@ setlocal
 pushd "%~dp0docs\playground" || goto :missing_project
 
 set "PLAYGROUND_PORT=3000"
+set "PLAYGROUND_MONITOR_ONLY="
+set "PLAYGROUND_NODE_MIN=24"
 if not "%~1"=="" set "PLAYGROUND_PORT=%~1"
+if /i "%~1"=="monitor" (
+    set "PLAYGROUND_MONITOR_ONLY=1"
+    set "PLAYGROUND_PORT=3000"
+)
 
 set "PLAYGROUND_NODE=node.exe"
-%PLAYGROUND_NODE% -e "process.exit(Number(process.versions.node.split('.')[0]) < 23 ? 1 : 0)" >nul 2>&1
+%PLAYGROUND_NODE% -e "process.exit(Number(process.versions.node.split('.')[0]) < %PLAYGROUND_NODE_MIN% ? 1 : 0)" >nul 2>&1
 if errorlevel 1 set "PLAYGROUND_NODE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
-"%PLAYGROUND_NODE%" -e "process.exit(Number(process.versions.node.split('.')[0]) < 23 ? 1 : 0)" >nul 2>&1
+"%PLAYGROUND_NODE%" -e "process.exit(Number(process.versions.node.split('.')[0]) < %PLAYGROUND_NODE_MIN% ? 1 : 0)" >nul 2>&1
 if errorlevel 1 (
-    echo Node.js 23 or newer is required. Install Node.js LTS and run this script again.
+    echo Node.js %PLAYGROUND_NODE_MIN% or newer is required. Install Node.js LTS and run this script again.
     goto :failed
 )
 
@@ -22,6 +28,7 @@ if errorlevel 1 (
 )
 
 set "PLAYGROUND_URL=http://127.0.0.1:%PLAYGROUND_PORT%/"
+if defined PLAYGROUND_MONITOR_ONLY goto :prepare
 curl.exe --noproxy "*" --fail --silent --max-time 5 "%PLAYGROUND_URL%" 2>nul | findstr /L /C:"<title>CCXT Markets</title>" >nul
 if not errorlevel 1 (
     echo CCXT Markets is already running: %PLAYGROUND_URL%
@@ -30,6 +37,7 @@ if not errorlevel 1 (
     exit /b 0
 )
 
+:prepare
 call :configure_proxy
 
 if not exist "node_modules\next\dist\bin\next" (
@@ -38,10 +46,18 @@ if not exist "node_modules\next\dist\bin\next" (
     if errorlevel 1 goto :failed
 )
 
+if defined PLAYGROUND_MONITOR_ONLY goto :monitor
 echo Open the market lookup after Next.js is ready: %PLAYGROUND_URL%
 echo Press Ctrl+C in this window to stop the server.
 set "PLAYGROUND_LOCAL_SETTINGS=1"
 "%PLAYGROUND_NODE%" "node_modules\next\dist\bin\next" dev --hostname 127.0.0.1 --port %PLAYGROUND_PORT%
+if errorlevel 1 goto :failed
+popd
+exit /b 0
+
+:monitor
+set "PLAYGROUND_LOCAL_SETTINGS=1"
+"%PLAYGROUND_NODE%" "scripts\market-monitor.mjs"
 if errorlevel 1 goto :failed
 popd
 exit /b 0

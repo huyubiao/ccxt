@@ -97,9 +97,9 @@ test("turnover multiples distinguish missing data from a measured zero", () => {
 test("signed thresholds support percent input and reject invalid values", () => {
   assert.equal(parseAlertThreshold("-50%"), -50);
   assert.equal(parseAlertThreshold("+3.5"), 3.5);
-  assert.equal(parseAlertThreshold("1%"), 1);
-  assert.equal(parseAlertThreshold("-1%"), -1);
-  for (const value of ["", "0", "0.99", "-0.99", "-100", "Infinity", "abc"]) assert.equal(parseAlertThreshold(value), null);
+  assert.equal(parseAlertThreshold("2%"), 2);
+  assert.equal(parseAlertThreshold("-2%"), -2);
+  for (const value of ["", "0", "1.99", "-1.99", "-100", "Infinity", "abc"]) assert.equal(parseAlertThreshold(value), null);
 });
 
 test("the default window uses samples up to exactly 30 seconds old", () => {
@@ -150,29 +150,30 @@ test("an expired trigger price gives way to the post-alert rolling window", () =
 });
 
 test("custom windows accept whole seconds within the supported range", () => {
-  for (const seconds of [1, 180, 300]) assert.equal(parseAlertSeconds(String(seconds)), seconds);
-  for (const value of ["", "0", "-1", "1.5", "301", "3600", "Infinity"]) assert.equal(parseAlertSeconds(value), null);
+  for (const seconds of [10, 180, 300]) assert.equal(parseAlertSeconds(String(seconds)), seconds);
+  for (const value of ["", "0", "-1", "9", "10.5", "301", "3600", "Infinity"]) assert.equal(parseAlertSeconds(value), null);
 });
 
 test("older settings are brought within the supported bounds", () => {
-  assert.equal(restoreAlertThreshold("0.5%"), 1);
-  assert.equal(restoreAlertThreshold("-0.5%"), -1);
+  assert.equal(restoreAlertThreshold("0.5%"), 2);
+  assert.equal(restoreAlertThreshold("-0.5%"), -2);
   assert.equal(restoreAlertThreshold("-2.5%"), -2.5);
   assert.equal(restoreAlertThreshold("-100%"), null);
   assert.equal(restoreAlertSeconds("3600"), 300);
   assert.equal(restoreAlertSeconds("60"), 60);
+  assert.equal(restoreAlertSeconds("5"), 10);
   assert.equal(restoreAlertSeconds("1.5"), null);
 });
 
-test("a one-second window can trigger a one-percent move on adjacent samples", () => {
-  for (const [threshold, price] of [[1, 0.0101], [-1, 0.0099]]) {
+test("a ten-second window can trigger at exactly two percent in either direction", () => {
+  for (const [threshold, price] of [[2, 0.0102], [-2, 0.0098]]) {
     const state = { samples: [] };
-    recordPrice(state, { time: 1000, price: 0.01 }, threshold, 1);
-    assert.equal(recordPrice(state, { time: 2000, price }, threshold, 1).triggered, true);
+    recordPrice(state, { time: 1000, price: 0.01 }, threshold, 10);
+    assert.equal(recordPrice(state, { time: 11000, price }, threshold, 10).triggered, true);
   }
   const belowThreshold = { samples: [] };
-  recordPrice(belowThreshold, { time: 1000, price: 0.01 }, 1, 1);
-  assert.equal(recordPrice(belowThreshold, { time: 2000, price: 0.0100999 }, 1, 1).triggered, false);
+  recordPrice(belowThreshold, { time: 1000, price: 0.01 }, 2, 10);
+  assert.equal(recordPrice(belowThreshold, { time: 11000, price: 0.0101999 }, 2, 10).triggered, false);
 });
 
 test("a 180-second rule applies to the initial window and to the trigger baseline", () => {

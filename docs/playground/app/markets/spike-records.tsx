@@ -1,5 +1,5 @@
 import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
-import type { AlertTurnover } from "@/lib/price-alerts";
+import { spikeKey, type SpikeRecord } from "@/lib/price-alerts";
 import styles from "./markets.module.css";
 
 export const SPIKE_RECORD_LIMIT = 100;
@@ -15,19 +15,7 @@ const statusLabels = {
   interrupted: "核验已中断",
 };
 
-export type SpikeRecord = {
-  symbol: string;
-  time: number;
-  price: number;
-  previous: number;
-  change: number;
-  threshold: number;
-  seconds: number;
-  level: number;
-  requiredMultiple: number | null;
-  status: keyof typeof statusLabels;
-  volume?: AlertTurnover & { multiple: number | null };
-};
+export type { SpikeRecord } from "@/lib/price-alerts";
 
 const formatTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
@@ -76,7 +64,7 @@ export default function SpikeRecords({ records }: { records: SpikeRecord[] }) {
               </tr></thead>
               <tbody>
                 {records.map((row) => (
-                  <tr key={`${row.symbol}:${row.time}:${row.threshold}`}>
+                  <tr key={spikeKey(row)}>
                     <th scope="row">{row.symbol}</th>
                     <td>{row.level} 级</td>
                     <td><time dateTime={new Date(row.time).toISOString()}>{formatTime.format(row.time)}</time></td>

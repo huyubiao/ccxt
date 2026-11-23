@@ -20,6 +20,7 @@ type Reference = {
   source: "Swolecharts" | "CoinBoss" | "CryptoHFTData";
   status: "covered" | "partial" | "unavailable";
   intervals: Record<number, Amounts>;
+  coveredHours?: Set<number>;
   detail: string;
 };
 
@@ -140,14 +141,14 @@ async function cryptoHFTReference(symbol: string, from: number, to: number): Pro
   const hours = Array.from({ length: Math.ceil((to - startHour) / hourMs) }, (_, i) => startHour + i * hourMs);
   const signal = AbortSignal.timeout(25_000);
   const seen = new Set<string>();
-  let availableHours = 0;
+  const coveredHours = new Set<number>();
   const intervals: Reference["intervals"] = {};
   for (let index = 0; index < hours.length && !signal.aborted; index += 6) {
     const batch = await Promise.all(hours.slice(index, index + 6).map((hour) =>
       readCryptoHFTHour(symbol, hour, signal).catch(() => null)));
-    for (const rows of batch) {
+    for (const [offset, rows] of batch.entries()) {
       if (!rows) continue;
-      availableHours++;
+      coveredHours.add(hours[index + offset]);
       for (const row of rows) {
         const time = Number(row.trade_time), price = Number(row.average_price), quantity = Number(row.filled_quantity);
         if (row.symbol !== symbol || !Number.isSafeInteger(time) || time < from || time >= to ||
@@ -160,10 +161,10 @@ async function cryptoHFTReference(symbol: string, from: number, to: number): Pro
       }
     }
   }
-  const detail = `成功读取 ${availableHours} / ${hours.length} 个小时档案，窗口内 ${seen.size} 笔，按成交均价 × 已成交数量统计。`;
-  if (!seen.size && availableHours < hours.length) return unavailable("CryptoHFTData", `${detail} 无法确认覆盖。`);
-  return { source: "CryptoHFTData", status: availableHours === hours.length ? "covered" : "partial",
-    intervals, detail: availableHours === hours.length ? detail : `${detail} 缺失档案可能尚未发布或该小时无记录。` };
+  const detail = `成功读取 ${coveredHours.size} / ${hours.length} 个小时档案，窗口内 ${seen.size} 笔，按成交均价 × 已成交数量统计。`;
+  if (!coveredHours.size) return unavailable("CryptoHFTData", `${detail} 无法确认覆盖。`);
+  return { source: "CryptoHFTData", status: coveredHours.size === hours.length ? "covered" : "partial",
+    intervals, coveredHours, detail: coveredHours.size === hours.length ? detail : `${detail} 缺失档案可能尚未发布或该小时无记录。` };
 }
 
 const cache = new Map<string, { to: number; expires: number; result: ReturnType<typeof loadBacktest> }>();
@@ -218,6 +219,26 @@ export function compareLiquidationBands(reference: Pick<Reference, "status" | "i
   });
 }
 
+export function summarizeBacktestCoverage(reference: Pick<Reference, "status" | "intervals" | "coveredHours">,
+  windows: { time: number; touched: Record<Side, boolean> | null }[]) {
+  const observations = windows.map(({ time }) => {
+    const covered = reference.status === "covered" || reference.coveredHours?.has(Math.floor(time / hourMs) * hourMs) === true;
+    const observed = reference.intervals[time];
+    return { covered, long: observed?.long ?? (covered ? 0 : null), short: observed?.short ?? (covered ? 0 : null) };
+  });
+  const falseAlerts = sides.map((side) => {
+    let negatives = 0, falsePositives = 0;
+    for (const [index, row] of observations.entries()) {
+      const touched = windows[index].touched;
+      if (!row.covered || row[side] === null || row[side] >= LIQUIDATION_EVENT_NOTIONAL || !touched) continue;
+      negatives++;
+      if (touched[side]) falsePositives++;
+    }
+    return { side, negatives, falsePositives };
+  });
+  return { observations, coveredWindows: observations.filter(({ covered }) => covered).length, falseAlerts };
+}
+
 async function loadBacktest(instrument: MarketInstrument, from: number, to: number) {
   const symbol = instrument.id;
   const [result, ...observations] = await Promise.all([
@@ -229,14 +250,24 @@ async function loadBacktest(instrument: MarketInstrument, from: number, to: numb
   ]);
   const { replay, marginUnavailable } = result;
   const snapshots = new Map(replay?.riskSnapshots.map((snapshot) => [snapshot.time, snapshot]));
-  const references = observations.map(({ source, status, detail, intervals }) => ({
-    source, status, detail, comparison: compareLiquidationBands({ status, intervals }, snapshots),
+  const marks = new Map(replay?.intervals.map(({ time, low, high }) => [time, { low, high }]));
+  const windows = Array.from({ length: (to - from) / LIQUIDATION_INTERVAL_MS }, (_, index) => {
+    const time = from + index * LIQUIDATION_INTERVAL_MS;
+    const snapshot = snapshots.get(time) ?? null;
+    const mark = marks.get(time) ?? null;
+    const overlaps = (side: Side) => snapshot!.bands.some((band) =>
+      band.side === side && mark!.high >= band.lowerPrice && mark!.low < band.upperPrice);
+    return { time, snapshot, mark, touched: snapshot && mark ? { long: overlaps("long"), short: overlaps("short") } : null };
+  });
+  const references = observations.map((reference) => ({
+    source: reference.source, status: reference.status, detail: reference.detail,
+    comparison: compareLiquidationBands(reference, snapshots), ...summarizeBacktestCoverage(reference, windows),
   }));
   const modelError = replay ? snapshots.size ? null : "没有可用于核对的历史风险图。"
     : instrument.onboardAt > from ? `该合约上市未满 ${LIQUIDATION_BACKTEST_HOURS} 小时，暂无法回放完整窗口。`
     : marginUnavailable ? BINANCE_MARGIN_UNAVAILABLE_MESSAGE
       : "币安历史仓位或行情数据不完整，暂无法重建风险图。";
-  return { symbol, from, to, snapshotCount: snapshots.size, references, modelError, eventNotional: LIQUIDATION_EVENT_NOTIONAL,
+  return { symbol, from, to, snapshotCount: snapshots.size, windows, references, modelError, eventNotional: LIQUIDATION_EVENT_NOTIONAL,
     leadMinutes: LIQUIDATION_SNAPSHOT_LEAD_MS / 60_000 };
 }
 

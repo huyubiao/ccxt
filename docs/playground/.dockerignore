@@ -8,6 +8,7 @@ runtime
 .env.local
 .env*.local
 .cache/strategy-notifications/
+.cache/market-monitor/
 
 # misc
 .git

@@ -13,6 +13,7 @@ const snapshot = (time) => ({ time, asOf: time - step, bands: [
 ] });
 globalThis.liquidationReplayFixture = async (_instrument, start, end) => ({
   riskSnapshots: Array.from({ length: (end - start) / step }, (_, index) => snapshot(start + index * step)),
+  intervals: Array.from({ length: (end - start) / step }, (_, index) => ({ time: start + index * step, low: 99, high: 100 })),
 });
 
 const hooks = registerHooks({
@@ -23,7 +24,7 @@ const hooks = registerHooks({
     return nextResolve(["./binance-margin-brackets", "./liquidation-levels"].includes(specifier) ? specifier + ".ts" : specifier, context);
   },
 });
-const { compareLiquidationBands, getLiquidationBacktest } = await import("./liquidation-backtest.ts");
+const { compareLiquidationBands, getLiquidationBacktest, summarizeBacktestCoverage } = await import("./liquidation-backtest.ts");
 hooks.deregister();
 
 for (const partial of [false, true]) {
@@ -53,8 +54,24 @@ for (const partial of [false, true]) {
     assert.equal(short.events, 0, "the amount threshold is per direction");
     assert.deepEqual(requests, [{ start: from, end: to, step: "5m" }]);
     assert.deepEqual(long.timeline.map(({ time }) => time), [from, to - step]);
+    assert.equal(reference.coveredWindows, partial ? 0 : 288);
+    assert.equal(reference.observations[1].long, partial ? null : 0);
+    assert.equal(reference.falseAlerts[0].falsePositives, partial ? 0 : 286);
   });
 }
+
+test("partially downloaded archives only supply negatives in successfully read hours", () => {
+  const reference = { status: "partial", intervals: {}, coveredHours: new Set([from]) };
+  const windows = [
+    { time: from, touched: { long: true, short: false } },
+    { time: from + step, touched: null },
+    { time: from + 3_600_000, touched: { long: true, short: true } },
+  ];
+  const coverage = summarizeBacktestCoverage(reference, windows);
+  assert.equal(coverage.coveredWindows, 2);
+  assert.equal(coverage.observations[2].long, null);
+  assert.deepEqual(coverage.falseAlerts[0], { side: "long", negatives: 1, falsePositives: 1 });
+});
 
 test("CoinBoss fills are matched individually without averaging their prices", async (t) => {
   t.mock.method(Date, "now", () => to + step);

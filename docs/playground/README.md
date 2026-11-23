@@ -402,17 +402,23 @@ USDT perpetual contracts. **异动监控**, **告警记录**, and **涨跌预测
 collapsed on each page load. **告警记录** and **涨跌预测** can be expanded
 independently inside the monitor. The **超阈值记录** navigation opens
 the price-trigger history while monitoring continues. Monitoring starts off by default.
-Turning it off closes the price stream and cancels pending checks.
-Set the window in whole seconds (1 to 300, default 30)
+Confirm the prompt after switching the strategy on or off. Turning it off
+closes the price stream and cancels pending checks.
+In local mode, turn on **异动监控 → 启用策略** to launch an independent process
+automatically. The process keeps monitoring after the browser or the local
+web server is closed. Turn off the same switch to stop it. On the public
+Playground, keep the market page open for browser-based monitoring.
+Set the window in whole seconds (10 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
-Both thresholds have a minimum magnitude of 1%. Downward thresholds must
-be below 100%. Previously saved settings below 1% or above 300 seconds are
-adjusted to the new bounds when the page loads.
+Both thresholds have a minimum magnitude of 2%. Downward thresholds must
+be below 100%. Previously saved thresholds and windows outside these bounds
+are adjusted when the settings are read.
 Each direction maintains its own rolling samples and alert levels.
 Changing the price thresholds or window restarts sampling. Existing signed
 threshold settings migrate to the corresponding direction.
-The monitor samples the latest received price once per second. A rule
-triggers when its signed percentage threshold is reached or exceeded.
+The local monitor uses the exchange's event timestamps. In browser mode, the
+monitor samples the latest received price once per second. A rule triggers
+when its signed percentage threshold is reached or exceeded.
 Levels compound from the threshold price rather than the traded price.
 For example, a 5% upward rule starting at 100 has levels at 105, 110.25,
 and 115.7625. A sample can reach several levels and reports the highest one.
@@ -426,8 +432,8 @@ before any alert in that series is issued. Later levels share that check.
 If the price advances while the check is pending, the highest level reached
 is reported when the check passes. The baseline
 is the median quote turnover of 60 complete one-minute candles before the
-window starts, scaled to its duration. The latest 100 price triggers and
-their check results stay in the browser. Data gaps or interrupted checks
+window starts, scaled to its duration. The page shows the latest 100 price
+triggers and their check results. Data gaps or interrupted checks
 remain visible in the history. Confirmed alerts appear in the strategy panel
 and can also be sent to a DingTalk group robot.
 
@@ -437,10 +443,10 @@ enabled, its signing secret. Click **保存并启用**, then **发送测试消�
 delivery. On the local settings page, enter up to 500 characters of custom text
 or leave the test message field blank to send the default. Then click
 **异动监控 → 开启钉钉通知** to send confirmed alerts
-from the monitor. This switch is off by default and is saved in the browser;
+from the monitor. Notifications start off by default.
 **停止钉钉通知** stops sending while alerts continue to appear on the page.
-Use **暂停推送** or **恢复推送** for the server-wide robot setting. Keep the
-market page open for live monitoring. Existing `DINGTALK_WEBHOOK_URL` and
+Use **暂停推送** or **恢复推送** for the server-wide robot setting.
+Existing `DINGTALK_WEBHOOK_URL` and
 `DINGTALK_WEBHOOK_SECRET` values act as a fallback until a robot is saved on
 the local page. To enable editing when starting the server manually, set `PLAYGROUND_LOCAL_SETTINGS=1`
 and bind Next.js to `127.0.0.1`.
@@ -448,11 +454,27 @@ Server-side strategies can call `strategyNotifier.send({ title, lines })` from
 `lib/strategy-notifications.ts`. Browser strategies add a typed event and a
 server-side template in `lib/strategy-notification-events.ts`.
 
-The browser saves the switch, window, price thresholds, and turnover multiple locally. The monitor
-starts a new price window after reconnecting, re-enabling, or changing the duration.
+The local monitor stores its rule, price triggers, alerts and latest DingTalk
+delivery attempts in `.cache/market-monitor/monitor.sqlite`. Both processes
+use the same `PLAYGROUND_MONITOR_DB` override if set. An existing local
+monitor rule takes precedence. The first local rule can reuse thresholds
+and notification preferences previously saved by that browser.
+The monitor starts a new price window after reconnecting, re-enabling, or
+changing the rule.
 Alerts include the level and Binance's latest available five-minute
 all-account long/short ratio and top-trader position ratio at the trigger time.
 The first trigger records the checked USDT turnover.
+
+Failed or rate-limited deliveries retry at most twice. **异动监控 → 告警记录**
+shows the outcome and last attempt for each alert. The worker retains 30 days
+of history on disk. With Node.js 24, `node --run monitor` from
+`docs/playground` also starts the worker in the foreground for diagnostics.
+
+Open **历史强平回测** under the selected coin's Binance liquidation panel to
+inspect the latest 24 hours in five-minute windows. Select a reference source
+and direction to compare observed liquidation amounts with earlier risk
+bands. Coverage gaps remain visible and are excluded from the false positive
+rate, which uses covered windows below the observed event threshold.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets

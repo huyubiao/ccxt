@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-test("alert ratio requests return both Binance ratios without querying OKX", async (t) => {
+test("alert ratio requests return both Binance ratios for previously supported windows", async (t) => {
   const time = Date.now();
   const key = Symbol.for("playground-alert-context-fixture");
   const calls = [];
@@ -28,19 +28,23 @@ test("alert ratio requests return both Binance ratios without querying OKX", asy
     "@/lib/short-volume": "export const VOLUME_DELAY_MS = 0;",
   };
   const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (context.parentURL?.endsWith("/binance-alert-ratios.ts") && specifier === "./binance-usdm") {
+      return { url: `data:text/javascript,${encodeURIComponent(modules["@/lib/binance-usdm"])}`, shortCircuit: true };
+    }
     if (context.parentURL?.endsWith("/alert-context/route.ts")) {
       if (Object.hasOwn(modules, specifier)) {
         return { url: `data:text/javascript,${encodeURIComponent(modules[specifier])}`, shortCircuit: true };
       }
       if (specifier === "next/server") return next("next/server.js", context);
       if (specifier === "@/lib/price-alerts") return next("../../../../lib/price-alerts.ts", context);
+      if (specifier === "@/lib/binance-alert-ratios") return next("../../../../lib/binance-alert-ratios.ts", context);
     }
     return next(specifier, context);
   } });
   t.after(() => { hooks.deregister(); delete globalThis[key]; });
 
   const { GET } = await import("../app/api/markets/alert-context/route.ts");
-  const nextUrl = new URL(`http://localhost/api/markets/alert-context?symbol=BTCUSDT&seconds=30&time=${time}&view=ratios`);
+  const nextUrl = new URL(`http://localhost/api/markets/alert-context?symbol=BTCUSDT&seconds=5&time=${time}&view=ratios`);
   const response = await GET({ nextUrl });
   assert.equal(response.status, 200);
   const query = { symbol: "BTCUSDT", period: "5m", limit: 2, endTime: time };
@@ -50,4 +54,7 @@ test("alert ratio requests return both Binance ratios without querying OKX", asy
     binanceAccounts: { ratio: 1, long: 0.5, short: 0.5, time: time - 1000 },
     binancePositions: { ratio: 3, long: 0.75, short: 0.25, time: time - 1000 },
   });
+  nextUrl.searchParams.set("view", "turnover");
+  assert.equal((await GET({ nextUrl })).status, 400);
+  assert.equal(calls.length, 3);
 });

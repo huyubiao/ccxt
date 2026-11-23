@@ -14,6 +14,7 @@ import {
   type LiveWindowComparison, type LiveWindowEstimate,
 } from "@/lib/liquidation-live";
 import styles from "./markets.module.css";
+import LiquidationBacktestPanel from "./liquidation-backtest-panel";
 
 const price = marketNumberFormatter({ maximumSignificantDigits: 8 });
 const amount = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
@@ -373,6 +374,7 @@ export default function CoinLiquidations({ symbol }: { symbol: string }) {
         <details><summary>查看仓位模型参数</summary><LiquidationModelParameters weighting={data.leverageWeighting} /></details>
       </>}
       <LiveLiquidationPanel windows={windows} status={streamStatus} marksUnavailable={marksUnavailable} />
+      <LiquidationBacktestPanel symbol={symbol} />
     </details>
   );
 }

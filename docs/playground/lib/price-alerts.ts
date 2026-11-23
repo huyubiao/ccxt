@@ -1,6 +1,7 @@
 export const DEFAULT_ALERT_SECONDS = 30;
+export const MIN_ALERT_SECONDS = 10;
 export const MAX_ALERT_SECONDS = 300;
-export const MIN_ALERT_PERCENT = 1;
+export const MIN_ALERT_PERCENT = 2;
 export const DEFAULT_TURNOVER_MULTIPLE = 3;
 export const TURNOVER_BASELINE_MINUTES = 60;
 
@@ -19,6 +20,23 @@ export type AlertMarketContext = {
   binancePositions: AlertRatio | null;
 };
 export type AlertTurnover = { turnover: number | null; baseline: number | null };
+export type SpikeRecord = {
+  symbol: string;
+  time: number;
+  price: number;
+  previous: number;
+  change: number;
+  threshold: number;
+  seconds: number;
+  level: number;
+  requiredMultiple: number | null;
+  status: "pending" | "alerted" | "upgraded" | "below-threshold" | "unavailable" | "skipped" | "interrupted";
+  volume?: AlertTurnover & { multiple: number | null };
+};
+
+export function spikeKey({ symbol, time, threshold }: Pick<SpikeRecord, "symbol" | "time" | "threshold">) {
+  return `${symbol}:${time}:${threshold}`;
+}
 
 export function parseTurnoverMultiple(value: string): number | null {
   const multiple = Number(value);
@@ -58,12 +76,12 @@ export function restoreAlertThreshold(value: string): number | null {
 
 export function parseAlertSeconds(value: string): number | null {
   const seconds = Number(value);
-  return Number.isInteger(seconds) && seconds >= 1 && seconds <= MAX_ALERT_SECONDS ? seconds : null;
+  return Number.isInteger(seconds) && seconds >= MIN_ALERT_SECONDS && seconds <= MAX_ALERT_SECONDS ? seconds : null;
 }
 
 export function restoreAlertSeconds(value: string): number | null {
   const seconds = Number(value);
-  return Number.isInteger(seconds) && seconds >= 1 ? Math.min(seconds, MAX_ALERT_SECONDS) : null;
+  return Number.isInteger(seconds) && seconds >= 1 ? Math.min(MAX_ALERT_SECONDS, Math.max(MIN_ALERT_SECONDS, seconds)) : null;
 }
 
 function isNewSample(samples: Sample[], sample: Sample) {
