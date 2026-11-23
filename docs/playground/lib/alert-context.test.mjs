@@ -11,6 +11,10 @@ test("alert ratio requests return both Binance ratios for previously supported w
   const modules = {
     "@/lib/binance-markets": `${fixture}
       export const getMarketInstrument = (...args) => { calls.push(args); return { id: 'BTCUSDT' }; };
+      export async function getKlines(pair, query) {
+        calls.push([pair, query]);
+        return [[query.startTime, '100', '120', '95', '110']];
+      }
       export const findOkxPerpetuals = () => { calls.push(['OKX']); return Promise.resolve([]); };`,
     "@/lib/binance-usdm": `${fixture}
       export const binanceUsdM = {
@@ -57,4 +61,18 @@ test("alert ratio requests return both Binance ratios for previously supported w
   nextUrl.searchParams.set("view", "turnover");
   assert.equal((await GET({ nextUrl })).status, 400);
   assert.equal(calls.length, 3);
+
+  const day = (Math.floor(time / 86_400_000) - 2) * 86_400_000 + 16 * 3_600_000;
+  nextUrl.searchParams.set("view", "day-open");
+  nextUrl.searchParams.set("time", String(day));
+  nextUrl.searchParams.delete("seconds");
+  const dayOpen = await GET({ nextUrl });
+  assert.equal(dayOpen.status, 200);
+  assert.deepEqual(await dayOpen.json(), { open: 100 });
+  assert.deepEqual(calls.at(-1), [
+    { kind: "futures", id: "BTCUSDT" },
+    { interval: "1h", startTime: day, endTime: day + 86_400_000 - 1, limit: 24 },
+  ]);
+  nextUrl.searchParams.set("time", String(day + 60_000));
+  assert.equal((await GET({ nextUrl })).status, 400);
 });

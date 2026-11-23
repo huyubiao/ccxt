@@ -53,7 +53,6 @@ export default function MarketsPage() {
   const [exchange, setExchange] = useState<MarketExchange>("binance");
   const [filter, setFilter] = useState("");
   const [selection, setSelection] = useState<string | null>(null);
-  const [showSpikeRecords, setShowSpikeRecords] = useState(false);
   const futures = binance.directory?.futures;
   const contracts = futures?.updatedAt != null ? futures.instruments : undefined;
   const contractCoins = useMemo(() => contracts && getContractCoins(contracts), [contracts]);
@@ -93,18 +92,6 @@ export default function MarketsPage() {
   const activePairs = coin?.markets[exchange] ?? [];
   const kinds = exchange === "binance" ? marketKinds : (["futures", "spot"] as const);
 
-  useEffect(() => {
-    function syncView() { setShowSpikeRecords(window.location.hash === "#spike-records"); }
-    syncView();
-    window.addEventListener("hashchange", syncView);
-    return () => window.removeEventListener("hashchange", syncView);
-  }, []);
-
-  useEffect(() => {
-    const section = document.getElementById(window.location.hash.slice(1));
-    section?.scrollIntoView();
-  }, [showSpikeRecords]);
-
   function selectCoin(item: Coin) {
     setSelection(item.symbol);
     if (!item.markets[exchange].length) setExchange("binance");
@@ -116,21 +103,20 @@ export default function MarketsPage() {
         <div className={styles.brand}><Logo size={22} /> 星期五</div>
         <nav className={styles.sectionNav} aria-label="页面板块">
           <a href="#market-alerts">交易策略</a>
-          <a href="#spike-records" aria-current={showSpikeRecords ? "page" : undefined}>超阈值记录</a>
           <a href="#coin-research">币种深度调研</a>
         </nav>
       </header>
 
       <div className={styles.content}>
-        {!showSpikeRecords && <div className={styles.intro}>
+        <div className={styles.intro}>
           <p className={styles.eyebrow}>BINANCE · OKX</p>
           <h1>币种行情</h1>
           <p>监控币安合约价格异动，查看币安和 OKX 的币种详情。</p>
-        </div>}
+        </div>
 
         <MarketMonitor contracts={contracts} coinCount={coinCount}
-          directoryError={binance.syncError || !!futures?.stale} showRecords={showSpikeRecords} />
-        {!showSpikeRecords && <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
+          directoryError={binance.syncError || !!futures?.stale} />
+        <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
           <div className={styles.researchHeading}>
             <h2 id="coin-research-heading" className={styles.sectionTitle}>币种深度调研</h2>
             <p>选择有币安 USDT 本位永续合约的币种，查看市值、代币解锁、最新成交价和成交额。各平台仅显示 USDT 报价交易对。</p>
@@ -202,7 +188,7 @@ export default function MarketsPage() {
               </div>
             )}
           </section>
-        </section>}
+        </section>
       </div>
     </main>
   );

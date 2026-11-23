@@ -1,50 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { allocatePositionExits, estimateLiquidationLevels, getLeverageWeighting, groupLiquidationTable, replayLiquidations, replayLiquidationsAsync,
+import { allocatePositionExits, estimateLiquidationLevels, getLeverageWeighting, groupLiquidationTable, replayLiquidations,
   LiquidationHistoryIncompleteError, requireLiquidationHistory,
   BINANCE_LIQUIDATION_CALIBRATION as calibration,
   selectLargeLiquidationZones, selectMarketCapHistory, MARKET_CAP_DAY_MS as day,
-  LIQUIDATION_BACKTEST_MS, LIQUIDATION_POSITION_HISTORY_MS, LIQUIDATION_INTERVAL_MS as step } from "./liquidation-levels.ts";
+  LIQUIDATION_POSITION_HISTORY_MS, LIQUIDATION_INTERVAL_MS as step } from "./liquidation-levels.ts";
 
 const bar = (time, low = 99, high = 101) => ({ time, low, high, close: 100 });
 const point = (time, quantity) => ({ time, quantity });
-
-test("async replay yields to pending I/O and exactly matches every synchronous interval", async () => {
-  const points = Array.from({ length: 161 }, (_, index) => point(index * step, 1000 + index % 7 * 20));
-  const bars = points.slice(0, -1).map(({ time }, index) => ({
-    time, open: 100, low: 99, high: 101, close: 100 + index % 3 * 0.1, volume: 200,
-  }));
-  const expected = replayLiquidations("BTCUSDT", points, bars, 0, 20 * step, 160 * step, null);
-  let ran = false;
-  setTimeout(() => { ran = true; }, 0);
-  const actual = await replayLiquidationsAsync("BTCUSDT", points, bars, 0, 20 * step, 160 * step, null);
-  assert.equal(ran, true);
-  assert.deepEqual(actual, expected);
-  await assert.rejects(replayLiquidationsAsync("BTCUSDT", points, bars.slice(1), 0, step, 160 * step, null), /interval is missing/);
-});
-
-test("replay uses the pre-event risk chart and ignores subsequent mark candles and open interest", async () => {
-  const target = 23 * step;
-  const issuedAt = target - step;
-  const points = Array.from({ length: 31 }, (_, index) => point(index * step, index ? 1_000 : 10));
-  const bars = points.slice(0, -1).map(({ time }) => ({ ...bar(time), open: 100, volume: 0 }));
-  const replay = (interest, candles) => replayLiquidationsAsync("TESTUSDT", interest, candles, 0, 20 * step,
-    30 * step, null, null, undefined, true);
-  const original = await replay(points, bars);
-  const changed = await replay(points.map((item) => item.time >= target ? { ...item, quantity: 2_000 } : item),
-    bars.map((item) => item.time >= issuedAt ? { ...item, high: 140, low: 60 } : item));
-  const before = original.riskSnapshots.find(({ time }) => time === target);
-  assert.equal(before.asOf, issuedAt);
-  const chart = estimateLiquidationLevels("TESTUSDT", points, bars.filter(({ time }) => time < issuedAt), 100, issuedAt);
-  const expected = chart.levels.filter(({ riskLevel }) => riskLevel === "high" || riskLevel === "extreme")
-    .map(({ side, lowerPrice, upperPrice, openInterestShare, riskLevel }) =>
-      ({ side, lowerPrice, upperPrice, openInterestShare, riskLevel }));
-  assert.ok(expected.length >= 2);
-  assert.deepEqual(before.bands, expected);
-  assert.deepEqual(changed.riskSnapshots.find(({ time }) => time === target), before);
-  assert.notDeepEqual(changed.riskSnapshots.find(({ time }) => time === target + step),
-    original.riskSnapshots.find(({ time }) => time === target + step));
-});
 
 test("risk bands are 1% wide and include the 3% and 6% thresholds", () => {
   const weights = { id: "risk-boundary", marketCapSlope: 0, volatilitySlope: 0, leveraged: [
@@ -694,7 +657,7 @@ test("exchange leverage below 20x merges unsupported weights into its ceiling", 
 
 test("the 24-hour replay covers every interval and counts the first touch of a warmup position", () => {
   const from = LIQUIDATION_POSITION_HISTORY_MS;
-  const to = from + LIQUIDATION_BACKTEST_MS;
+  const to = from + day;
   const points = Array.from({ length: to / step + 1 }, (_, index) => point(index * step, index ? 200 : 0));
   const bars = points.slice(0, -1).map(({ time }) => time < from ? bar(time) : bar(time, 99, 106));
   const result = replayLiquidations("TESTUSDT", points, bars, 0, from, to, null);

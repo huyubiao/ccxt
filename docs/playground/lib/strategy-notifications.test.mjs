@@ -1,29 +1,47 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { registerHooks } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { createDingTalkSettings, createStrategyNotifier } from "./strategy-notifications.ts";
-import { formatNotificationEvent } from "./strategy-notification-events.ts";
+
+const eventsModule = new URL("./strategy-notification-events.ts", import.meta.url);
+const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL === eventsModule.href && /^\.\/[a-z-]+$/.test(specifier)) {
+      return nextResolve(specifier + ".ts", context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { createMarketSpikeEvent, formatNotificationEvent } = await import(eventsModule.href);
+hooks.deregister();
 
 const webhook = "https://oapi.dingtalk.com/robot/send?access_token=example";
 const now = Date.UTC(2026, 10, 12, 2, 0, 0);
-const alert = {
-  kind: "market-spike", symbol: "币安人生USDT", time: now, level: 2, seconds: 30,
-  previous: 0.002, price: 0.0019, change: -5, threshold: -5, multiple: 3.25,
-};
+const alert = createMarketSpikeEvent({
+  symbol: "币安人生USDT", time: now, level: 2, seconds: 30,
+  previous: 0.002, price: 0.0019, change: -5, threshold: -5,
+}, { baseline: 120_000, turnover: 390_000, multiple: 3.25 }, 0.00191);
 
 test("uses a fixed template for market spike alerts", () => {
   const message = formatNotificationEvent(alert);
   assert.equal(message.title, "异动监控｜币安人生USDT 2 级告警");
   assert.match(message.lines.join("\n"), /2026\/11\/12 10:00:00（北京时间）/);
   assert.match(message.lines.join("\n"), /-5%.*-5%/);
-  assert.match(message.lines.join("\n"), /成交额 3\.25 倍/);
+  assert.ok(message.lines.includes("成交额3.25倍(12万 -> 39万)"));
+  assert.ok(message.lines.includes("涨跌预测：上涨"));
   assert.equal(formatNotificationEvent({ ...alert, price: "0.0019" }), null);
   assert.equal(formatNotificationEvent({ ...alert, symbol: "BTC\n伪造消息" }), null);
   assert.equal(formatNotificationEvent({ kind: "other", text: "伪造消息" }), null);
-  const { multiple, ...upgrade } = alert;
-  assert.doesNotMatch(formatNotificationEvent(upgrade).lines.join("\n"), /成交额/);
+  assert.equal(formatNotificationEvent({ ...alert, forecastDirection: "sideways" }), null);
+  const { forecastDirection, volume, ...legacy } = alert;
+  const legacyMessage = formatNotificationEvent({ ...legacy, multiple: volume.multiple });
+  assert.ok(legacyMessage.lines.includes("成交额3.25倍"));
+  assert.ok(legacyMessage.lines.includes("涨跌预测：下跌"));
+  assert.equal(legacyMessage.deduplicationKey, message.deduplicationKey);
+  assert.doesNotMatch(formatNotificationEvent(legacy).lines.join("\n"), /成交额/);
   assert.deepEqual(formatNotificationEvent({ ...alert, text: "自定义消息" }), message);
 });
 
@@ -61,7 +79,8 @@ test("sends a confirmed market spike as signed text without exposing credentials
         "2026/11/12 10:00:00（北京时间）",
         "30 秒窗口 · 涨跌 -5% · 阈值 -5%",
         "参考价 0.002 → 触发价 0.0019 USDT",
-        "成交额 3.25 倍",
+        "成交额3.25倍(12万 -> 39万)",
+        "涨跌预测：上涨",
       ].join("\n") },
     });
     return Response.json({ errcode: 0, errmsg: "ok" });

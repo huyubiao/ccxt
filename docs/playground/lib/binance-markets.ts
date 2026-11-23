@@ -195,7 +195,7 @@ export async function getMarketInstrument(kind: MarketKind, symbol: string, exch
 
 type KlineParams = { interval: string; startTime: number; endTime: number; limit: number };
 
-export async function getKlines({ kind, id: symbol }: MarketInstrument, params: KlineParams): Promise<unknown[][]> {
+export async function getKlines({ kind, id: symbol }: Pick<MarketInstrument, "kind" | "id">, params: KlineParams): Promise<unknown[][]> {
   if (kind === "alpha") return alphaGet("/alpha-trade/klines", { symbol, ...params });
   const request = { ...params, symbol, maxRetriesOnFailure: 1, maxRetriesOnFailureDelay: 400 };
   return kind === "spot" ? binanceSpot.publicGetKlines(request) : binanceUsdM.fapiPublicGetKlines(request);

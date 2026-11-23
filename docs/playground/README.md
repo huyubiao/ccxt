@@ -69,20 +69,6 @@ use an estimate from Binance's open-interest snapshot and circulating supply.
 The token overview displays current circulating and maximum-supply market
 caps once per asset.
 
-After a confirmed alert, the monitor uses recent taker trades, near-midpoint
-depth, and estimated liquidation pressure to forecast the move when there is
-sufficient directional evidence and a fresh price. Open interest change and holder
-concentration scale the estimated move. An unusually large aggregate fill
-is a proxy for aggressive buying or selling.
-
-The forecast fixes the baseline at publication and settles on the first
-one-minute candle close at least five minutes later. The table compares the
-estimated move with the realized move and reports direction hits and mean
-absolute error in percentage points over settled forecasts in the latest
-100 alert samples. Records stay in the browser and due forecasts can settle
-after reopening the page. Alerts without a forecast show their data status
-and are excluded from settlement and accuracy statistics.
-
 Research shows the Binance long/short liquidation risk chart. The snapshot
 API at GET /api/markets/liquidations?symbol=JCTUSDT returns price bands and
 their openInterestShare and riskLevel. The chart grades modeled position
@@ -90,8 +76,8 @@ concentration if the mark price reaches each band. It exposes the price
 bounds, direction, mark price and snapshot coverage. The API also retains
 the modeled band notional fields for strategy calculations.
 
-Live estimates and alert replay allocate new positions across 1x, 2x,
-3x, 4x, 5x, 7x, 10x, 20x, and 50x. Both paths read the Binance public leverage
+Live estimates allocate new positions across 1x, 2x,
+3x, 4x, 5x, 7x, 10x, 20x, and 50x. They read the Binance public leverage
 and margin schedule and use `binance-position-calibrated-2026-11-20`. A contract
 with a maximum below 50x receives the 50x
 weight at 20x. If its maximum is below 20x, all weight above that maximum
@@ -231,29 +217,6 @@ withholds differences when a window lacks a prior snapshot or continuous
 stream coverage. Each visit starts a new in-memory session with up to 48
 closed windows. A closed connection retries automatically.
 
-The historical risk-band backtest API uses GET /api/markets/liquidations/backtest?symbol=INITUSDT.
-The replay warms up the same position model as the live chart for 24 hours
-or from listing. For each five-minute test interval it rebuilds the same 1%
-risk bands using the latest close already known five minutes before the
-target interval begins. It keeps bands with at least 3% of their side’s
-outstanding positions. No target-interval prices determine the prediction.
-
-A platform event is at least 10,000 USD in recorded liquidations for one
-contract, direction and interval. CryptoHFTData uses USDT. The backtest
-puts each priced fill in the predicted band containing its price. Band
-bounds include the lower price and exclude the upper price. An event is a
-hit if the total in any one predicted band reaches the same 10,000 threshold.
-The event detail shows observed prices, amounts, and each predicted band.
-
-Missing snapshots or incomplete prices leave a case undetermined unless
-the priced fills already prove a hit. Hit rate divides hits by the number
-of hits and misses. The Swolecharts time series supplies aggregate amounts,
-so its large-event count is visible with band results undetermined.
-CoinBoss supplies order records with prices when available. CryptoHFTData
-supplies hourly archives with average fill prices and filled quantities.
-Providers are compared separately. The window ends one bar before the latest
-five-minute boundary to allow open interest to publish.
-
 The earlier `binance-swolecharts-2026-11-19` profile used tiers up to 100x.
 Its calibration fitted 47 contracts using the seven days
 ending November 12 at 11:00 UTC. The following seven days were held out.
@@ -263,8 +226,7 @@ closer for 65 contracts. The pooled total moved from 3.0% below the reference
 to 12.7% above it. For the 35 contracts excluded from training, the median
 error fell from 86.0% to 67.6%. Weight normalization and leverage ceilings
 were verified for the 764 active Binance USDT perpetuals. The SwoleCharts
-market directory matched 521 of those contracts at capture time. Historical
-coverage can differ from the directory, so the backtest checks each window.
+market directory matched 521 of those contracts at capture time.
 [SwoleCharts API documentation](https://swolecharts.com/developers)
 
 The seven-day amount figures above apply to that earlier profile. An earlier
@@ -398,10 +360,8 @@ by the mean of up to 180 preceding full trading days. The server caches a valid
 multiple until the next UTC day.
 
 Use the price monitor embedded in the market page to watch all listed Binance
-USDT perpetual contracts. **异动监控**, **告警记录**, and **涨跌预测** start
-collapsed on each page load. **告警记录** and **涨跌预测** can be expanded
-independently inside the monitor. The **超阈值记录** navigation opens
-the price-trigger history while monitoring continues. Monitoring starts off by default.
+USDT perpetual contracts. **异动监控** and **告警记录** start collapsed on
+each page load. Monitoring starts off by default.
 Confirm the prompt after switching the strategy on or off. Turning it off
 closes the price stream and cancels pending checks.
 In local mode, turn on **异动监控 → 启用策略** to launch an independent process
@@ -425,7 +385,7 @@ and 115.7625. A sample can reach several levels and reports the highest one.
 Each level reached starts a fresh window for the next level. If the window
 expires, the monitor returns to looking for the start of a new series.
 
-Price triggers appear in **超阈值记录**. The first trigger in each series
+Price triggers appear in **告警记录**. The first trigger in each series
 enters the turnover check queue. The configured window's Binance USDT
 turnover must reach the configured multiple (default 3×) of the baseline
 before any alert in that series is issued. Later levels share that check.
@@ -433,9 +393,27 @@ If the price advances while the check is pending, the highest level reached
 is reported when the check passes. The baseline
 is the median quote turnover of 60 complete one-minute candles before the
 window starts, scaled to its duration. The page shows the latest 100 price
-triggers and their check results. Data gaps or interrupted checks
-remain visible in the history. Confirmed alerts appear in the strategy panel
-and can also be sent to a DingTalk group robot.
+triggers and their check results, including queued, unsuccessful, and
+interrupted checks. In **告警记录**, check individual rows or use **全选** in
+the table header to select all currently displayed rows. Choose **删除选中记录**
+to remove them from the table. In local monitor mode, older retained records
+fill the available slots. Browser mode keeps up to 100 triggers locally.
+The daily change compares the trigger price with the
+opening price of that Beijing calendar day. Confirmed alerts can also be
+sent to a DingTalk group robot.
+
+Before confirming an alert, the monitor forecasts **上涨** or **下跌** from
+the move between the trigger price and the latest monitored sample.
+If that price is unchanged or a newer sample is unavailable, it uses
+the alert's own direction. The forecast appears in the DingTalk message.
+The local monitor saves it with the alert even
+when the page is closed. Older alerts without a saved forecast use
+the direction recorded at the trigger.
+
+Both **告警记录** and the DingTalk message show the turnover multiple and
+the baseline-to-window turnover in units of 10,000 USDT, for example
+`成交额3.25倍(12万 -> 39万)`. Upgrades show the turnover comparison from
+the first checked window of the same series.
 
 On Windows, launch with `start-playground.cmd` and open **交易策略 → 钉钉推送**
 on the local market page. Paste the group robot Webhook and, if signing is
@@ -463,18 +441,41 @@ The monitor starts a new price window after reconnecting, re-enabling, or
 changing the rule.
 Alerts include the level and Binance's latest available five-minute
 all-account long/short ratio and top-trader position ratio at the trigger time.
-The first trigger records the checked USDT turnover.
 
-Failed or rate-limited deliveries retry at most twice. **异动监控 → 告警记录**
-shows the outcome and last attempt for each alert. The worker retains 30 days
+Failed or rate-limited deliveries retry at most twice. The worker retains 30 days
 of history on disk. With Node.js 24, `node --run monitor` from
 `docs/playground` also starts the worker in the foreground for diagnostics.
 
-Open **历史强平回测** under the selected coin's Binance liquidation panel to
-inspect the latest 24 hours in five-minute windows. Select a reference source
-and direction to compare observed liquidation amounts with earlier risk
-bands. Coverage gaps remain visible and are excluded from the false positive
-rate, which uses covered windows below the observed event threshold.
+### Automatic order monitoring
+
+**交易策略 → 自动下单任务** lists tasks across strategies with their
+sources. Each strategy shows its own **下单请求**. Confirmed market spike
+alerts create tasks through the monitor's `submit` method in `lib/auto-order.ts`.
+
+Strategies on the same Binance USDT perpetual share one quote worker.
+Each strategy tracks its own price range and expires after 60 minutes
+without a new confirmed signal or a qualifying order condition if its
+position is flat. The worker stops when the last strategy on that contract
+ends. The monitor exposes `updateStrategy` for reporting conditions and
+positions.
+
+Turning off **异动监控** stops its automatic order monitoring tasks and
+discards its pending task signals. Existing positions are left open. Use
+the row checkboxes or **全选** in **自动下单任务** to delete the selected
+records. A new confirmed trigger can add a fresh record for the same
+contract. Ongoing monitoring is controlled by the strategy switch.
+
+`requestOrder` records an active strategy's order request by strategy,
+contract and request ID. The strategy section shows its request history.
+Local mode saves requests to SQLite. Browser mode keeps them for the
+current page session. This stage records requests for display.
+
+Up to 20 distinct contracts can be monitored at once. Additional strategies
+can join a contract that is already monitored. A new contract over the
+limit fails immediately and writes a warning. In local mode the market
+monitor process owns the threads, records status in SQLite, and writes
+warnings to the worker log. Browser mode uses Web Workers for the current
+page session and writes warnings to the browser console.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets
@@ -508,8 +509,7 @@ to serve under a sub-path. `docker-compose.yml` enforces the host protections:
 - **non-root + `no-new-privileges` + `cap_drop: ALL`** → minimal blast radius;
 - **egress allowlist** → the app runs on an internet-less `internal` network. All
   outbound goes through the `egress-proxy` (squid) sidecar, which permits the
-  exchange API domains generated from CCXT and HTTPS to the exact SwoleCharts,
-  CoinBoss and CryptoHFTData liquidation API hosts (`proxy/`). Mining pools, C2,
+  exchange API domains generated from CCXT (`proxy/`). Mining pools, C2,
   data-exfil endpoints, and the host's neighbor services are all unreachable —
   even via a raw socket, because the app has no other route out;
 - **no inference credential in the container** — the app posts to the endpoint in

@@ -1,22 +1,25 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { mergeAlertHistory, readSpikeRecords, retainSpikeRecords, saveSpikeRecords } from "@/lib/alert-history";
+import {
+  AUTO_ORDER_HISTORY_LIMIT, autoOrderKey, autoOrderRequestKey, autoOrderWatchKey, createAutoOrderMonitor, isAutoOrderActive, marketSpikeStrategy,
+  type AutoOrderRequest, type AutoOrderWatch, type AutoOrderWatchIdentity,
+} from "@/lib/auto-order";
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
-import { formatMarketAmount, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import {
   DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, MIN_ALERT_SECONDS, TURNOVER_BASELINE_MINUTES,
   getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
   recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries, spikeKey,
-  type AlertMarketContext, type AlertRatio, type AlertTurnover, type DirectionalThresholds,
-  type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries,
+  type AlertTurnover, type AlertVolume, type DirectionalThresholds,
+  type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries, type SpikeIdentity, type SpikeRecord,
 } from "@/lib/price-alerts";
-import SpikeForecastPanel from "./spike-forecast-panel";
+import { createMarketSpikeEvent } from "@/lib/strategy-notification-events";
 import { useBackgroundMonitor } from "./use-background-monitor";
-import type { BackgroundRecord, BackgroundRule, DeliveryState } from "@/lib/background-monitor-types";
-import { MAX_FORECAST_AGE_MS } from "@/lib/spike-forecast";
-import SpikeRecords, { readSpikeRecords, saveSpikeRecords, SPIKE_RECORD_LIMIT, type SpikeRecord } from "./spike-records";
-import { useSpikeForecasts } from "./use-spike-forecasts";
+import type { BackgroundRule } from "@/lib/background-monitor-types";
+import AlertRecords from "./alert-records";
+import AutoOrders, { StrategyOrderRequests } from "./auto-orders";
 import { useStrategyNotifications } from "./use-strategy-notifications";
 import DingTalkSettings from "./dingtalk-settings";
 import styles from "./markets.module.css";
@@ -32,16 +35,7 @@ const QUEUE_LIMIT = 100;
 const TURNOVER_CONCURRENCY = 2;
 const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: null, down: -5 };
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
-const formatAlertChange = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "exceptZero" });
-const formatPrice = marketNumberFormatter({ maximumSignificantDigits: 12 });
-const formatRatio = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
-const formatShare = new Intl.NumberFormat("zh-CN", { style: "percent", maximumFractionDigits: 2 });
-const formatTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" });
 
-type Alert = SpikeRecord & {
-  context?: AlertMarketContext | "request-failed" | "queue-skipped" | "monitor-stopped";
-  delivery?: BackgroundRecord;
-};
 type TurnoverJob = {
   record: SpikeRecord & { requiredMultiple: number };
   state: LeveledPriceState;
@@ -56,38 +50,10 @@ function levelRecord(symbol: string, move: PriceAlertLevel, threshold: number, s
   };
 }
 
-function Ratio({ data }: { data: AlertRatio | null | undefined }) {
-  if (!data) return "—";
-  return <>{formatRatio.format(data.ratio)} <small>多 {formatShare.format(data.long)} / 空 {formatShare.format(data.short)}</small>
-    <small>{formatTime.format(data.time)}</small></>;
-}
-
-const alertContextMessages = {
-  "request-failed": "告警行情请求失败",
-  "queue-skipped": "告警过多，已跳过行情补查",
-  "monitor-stopped": "监控已停止，行情补查取消",
-};
-
-const deliveryLabels: Record<DeliveryState, string> = {
-  disabled: "未开启推送", queued: "等待推送", sending: "正在推送", sent: "已送达", duplicate: "重复已跳过",
-  "rate-limited": "钉钉限流", failed: "发送失败", paused: "机器人已暂停", unconfigured: "机器人未配置",
-  invalid: "配置或内容无效", "config-unavailable": "读取配置失败", unknown: "送达结果未知",
-};
-
-function Delivery({ record }: { record?: BackgroundRecord }) {
-  if (!record) return "—";
-  const { delivery, attempts, lastAttempt, lastResult } = record;
-  return <>{deliveryLabels[delivery]}{attempts > 0 && <small>
-    第 {attempts} 次{lastAttempt && ` · ${formatTime.format(lastAttempt)}`}
-    {lastResult && lastResult !== delivery && ` · 上次${deliveryLabels[lastResult]}`}
-  </small>}</>;
-}
-
-export default function MarketMonitor({ contracts, coinCount, directoryError, showRecords }: {
+export default function MarketMonitor({ contracts, coinCount, directoryError }: {
   contracts: readonly MarketInstrument[] | undefined;
   coinCount: number | null;
   directoryError: boolean;
-  showRecords: boolean;
 }) {
   const [enabled, setEnabled] = useState(false);
   const [upInput, setUpInput] = useState("5");
@@ -100,14 +66,42 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   const [turnoverInput, setTurnoverInput] = useState(String(DEFAULT_TURNOVER_MULTIPLE));
   const [turnoverMultiple, setTurnoverMultiple] = useState(DEFAULT_TURNOVER_MULTIPLE);
   const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | null>(null);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [spikes, setSpikes] = useState<SpikeRecord[]>([]);
+  const [browserOrders, setBrowserOrders] = useState<AutoOrderWatch[]>([]);
+  const deletedBrowserOrders = useRef(new Set<string>());
+  const [browserRequests, setBrowserRequests] = useState<AutoOrderRequest[]>([]);
+  const seenRequests = useRef(new Set<string>());
+  const [autoOrders] = useState(() => createAutoOrderMonitor((symbol, report, fail) => {
+    const worker = new Worker(new URL("./auto-order.worker.ts", import.meta.url), { name: symbol, type: "module" });
+    worker.onmessage = (event) => report(event.data);
+    worker.onerror = fail;
+    worker.onmessageerror = fail;
+    return { quote: (tick) => worker.postMessage(tick), stop: () => worker.terminate() };
+  }, (watch) => {
+    if (deletedBrowserOrders.current.has(autoOrderWatchKey(watch))) return;
+    const key = autoOrderKey(watch);
+    setBrowserOrders((current) => {
+      const records = [watch, ...current.filter((row) => autoOrderKey(row) !== key)];
+      const active = records.filter(isAutoOrderActive).length;
+      return records.sort((a, b) => Number(isAutoOrderActive(b)) - Number(isAutoOrderActive(a)) || b.time - a.time)
+        .slice(0, Math.max(AUTO_ORDER_HISTORY_LIMIT, active));
+    });
+  }, (request) => {
+    const key = autoOrderRequestKey(request);
+    if (seenRequests.current.has(key)) return false;
+    seenRequests.current.add(key);
+    setBrowserRequests((current) => {
+      const recent = [request, ...current.filter(({ strategyId }) => strategyId === request.strategyId)]
+        .sort((a, b) => b.time - a.time).slice(0, AUTO_ORDER_HISTORY_LIMIT);
+      return [...current.filter(({ strategyId }) => strategyId !== request.strategyId), ...recent];
+    });
+    return true;
+  }));
   const [recordsReady, setRecordsReady] = useState(false);
   const background = useBackgroundMonitor();
   const server = background.mode === "local";
-  const canEdit = background.mode !== "loading" && !background.saving;
+  const canEdit = background.mode !== "loading" && !background.saving && !background.deleting;
   const serverRule = background.data?.configured ? background.data.rule : null;
-  const { records: forecasts, addAlerts: addForecastAlerts } = useSpikeForecasts();
   const strategyNotifications = useStrategyNotifications();
   const { config: dingTalkConfig, configMessage: dingTalkConfigMessage, notifyStrategy } = strategyNotifications;
   const [observedSymbols, setObservedSymbols] = useState<ReadonlySet<string>>(() => new Set());
@@ -129,35 +123,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
   const displayedMultiple = serverRule?.turnoverMultiple ?? turnoverMultiple;
   const serverSpikes = background.data?.spikes;
   const serverRecords = background.data?.records;
-  const displayedSpikes = useMemo(() => {
-    if (!serverSpikes) return spikes;
-    const rows = new Map(spikes.map((row) => [spikeKey(row), row]));
-    for (const row of serverSpikes) rows.set(spikeKey(row), row);
-    return [...rows.values()].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT);
-  }, [serverSpikes, spikes]);
-  const displayedAlerts = useMemo<Alert[]>(() => {
-    if (!serverRecords) return alerts;
-    const byKey = new Map(serverSpikes?.map((row) => [spikeKey(row), row]));
-    return serverRecords.map((delivery) => {
-      const row = byKey.get(spikeKey(delivery.event));
-      return { requiredMultiple: null, ...row, ...delivery.event, status: "alerted", delivery,
-        context: delivery.event.context ?? undefined };
-    });
-  }, [serverRecords, serverSpikes, alerts]);
-
-  const forecasted = useRef(new Set<string>());
-  useEffect(() => {
-    if (!serverRecords?.length) return;
-    const now = Date.now();
-    const current = new Set(serverRecords.map(({ id }) => id));
-    for (const id of forecasted.current) {
-      if (!current.has(id)) forecasted.current.delete(id);
-    }
-    const recent = serverRecords.filter(({ event, id }) => now - event.time <= MAX_FORECAST_AGE_MS && !forecasted.current.has(id));
-    if (!recent.length) return;
-    for (const { id } of recent) forecasted.current.add(id);
-    addForecastAlerts(recent.map(({ event }) => event));
-  }, [serverRecords, addForecastAlerts]);
+  const history = useMemo(() => mergeAlertHistory(spikes, serverSpikes, serverRecords), [spikes, serverSpikes, serverRecords]);
 
   const storedUp = serverRule?.up;
   const storedDown = serverRule?.down;
@@ -236,6 +202,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
     if (recordsReady) saveSpikeRecords(spikes);
   }, [recordsReady, spikes]);
 
+  useEffect(() => () => autoOrders.stop(), [autoOrders]);
+
   useEffect(() => {
     if (!hasSymbols) return;
     const lifecycle = new AbortController();
@@ -250,13 +218,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
     const pendingTurnover: TurnoverJob[] = [];
     let turnoverScope = new AbortController();
     let checkingTurnover = 0;
-    const pendingContext: Alert[] = [];
-    let loadingContext = false;
-
-    async function fetchAlertData<T>(record: Pick<Alert, "symbol" | "seconds" | "time">, view: "turnover" | "ratios",
-      signal = lifecycle.signal): Promise<T> {
+    async function fetchTurnover(record: SpikeRecord, signal: AbortSignal): Promise<AlertTurnover> {
       const params = new URLSearchParams({
-        symbol: record.symbol, seconds: String(record.seconds), time: String(record.time), view,
+        symbol: record.symbol, seconds: String(record.seconds), time: String(record.time), view: "turnover",
       });
       const response = await fetch(apiUrl(`/api/markets/alert-context?${params}`), {
         signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]),
@@ -265,40 +229,15 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
       return response.json();
     }
 
-    async function loadContext() {
-      if (loadingContext) return;
-      loadingContext = true;
-      try {
-        while (pendingContext.length && !lifecycle.signal.aborted) {
-          const alert = pendingContext.shift()!;
-          const context = await fetchAlertData<AlertMarketContext>(alert, "ratios").catch(() => "request-failed" as const);
-          if (!lifecycle.signal.aborted) {
-            setAlerts((previous) => previous.map((row) => row === alert ? { ...row, context } : row));
-          }
-        }
-      } finally {
-        loadingContext = false;
-      }
-    }
-
     function addSpikeRecords(batch: SpikeRecord[]) {
-      setSpikes((current) => [...batch, ...current].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT));
+      setSpikes((current) => retainSpikeRecords([...batch, ...current]));
     }
 
-    function confirmAlert(record: SpikeRecord) {
-      const alert: Alert = { ...record };
-      setAlerts((current) => [alert, ...current].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT));
-      if (notifyDingTalk.current) {
-        const { symbol, seconds, change, level, time, price, previous, threshold, volume } = record;
-        notifyStrategy({ kind: "market-spike", symbol, seconds, change, level, time, price, previous, threshold, multiple: volume?.multiple });
-      }
-      addForecastAlerts([alert]);
-      pendingContext.push(alert);
-      if (pendingContext.length > QUEUE_LIMIT) {
-        const dropped = pendingContext.shift();
-        setAlerts((current) => current.map((row) => row === dropped ? { ...row, context: "queue-skipped" } : row));
-      }
-      void loadContext();
+    function confirmAlert(record: SpikeRecord & { volume: AlertVolume }, latestPrice?: number) {
+      if (!activeSymbols.current?.has(record.symbol)) return;
+      const event = createMarketSpikeEvent(record, record.volume, latestPrice);
+      autoOrders.submit({ strategy: marketSpikeStrategy, symbol: event.symbol, time: event.time });
+      if (notifyDingTalk.current) notifyStrategy(event);
     }
 
     function resetPriceMonitoring() {
@@ -320,35 +259,33 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
 
     async function checkTurnover({ record, state, series }: TurnoverJob) {
       const signal = turnoverScope.signal;
-      const data = await fetchAlertData<AlertTurnover>(record, "turnover", signal).catch(() => null);
+      const data = await fetchTurnover(record, signal).catch(() => null);
       if (lifecycle.signal.aborted || signal.aborted) return;
       syncRule();
       if (signal.aborted) return;
       const direction = record.threshold > 0 ? "up" : "down";
       if (!activeSymbols.current?.has(record.symbol) || samples.get(record.symbol)?.[direction] !== state) {
-        settlePriceSeries(state, series, false);
+        settlePriceSeries(state, series, null);
         setSpikes((current) => current.map((row) => row === record ? { ...row, status: "interrupted" } : row));
         return;
       }
       const multiple = data ? getTurnoverMultiple(data) : null;
-      const latest = settlePriceSeries(state, series, multiple !== null && multiple >= record.requiredMultiple);
+      const volume = data ? { ...data, multiple } : undefined;
+      const passed = volume && multiple !== null && multiple >= record.requiredMultiple;
+      const latest = settlePriceSeries(state, series, passed ? volume : null);
       const upgraded = latest !== null && latest.level > record.level;
       const result: SpikeRecord = {
         ...record,
         status: latest ? upgraded ? "upgraded" : "alerted" : multiple === null ? "unavailable" : "below-threshold",
-        volume: data ? { ...data, multiple } : undefined,
+        volume,
       };
-      setSpikes((current) => current.map((row) => row === record ? result : row));
-      if (latest && upgraded) {
-        const alert: SpikeRecord = {
-          ...levelRecord(record.symbol, latest, record.threshold, record.seconds),
-          status: "alerted", requiredMultiple: null,
-        };
-        addSpikeRecords([alert]);
-        confirmAlert(alert);
-      } else if (latest) {
-        confirmAlert(result);
+      if (latest && volume) {
+        const details = upgraded ? levelRecord(record.symbol, latest, record.threshold, record.seconds) : record;
+        const alert = { ...details, status: "alerted" as const, requiredMultiple: upgraded ? null : record.requiredMultiple, volume };
+        confirmAlert(alert, state.samples.at(-1)?.price);
+        if (upgraded) addSpikeRecords([alert]);
       }
+      setSpikes((current) => current.map((row) => row === record ? result : row));
     }
 
     function processTurnoverQueue() {
@@ -398,7 +335,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
             batch.push(record);
             pendingTurnover.push({ record, state, series: result.series });
           } else {
-            const record: SpikeRecord = { ...details, requiredMultiple: null, status: "alerted" };
+            const record = { ...details, requiredMultiple: null, status: "alerted" as const, volume: result.volume };
             batch.push(record);
             confirmAlert(record);
           }
@@ -409,7 +346,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
       if (pendingTurnover.length > QUEUE_LIMIT) {
         const dropped = new Set<SpikeRecord>();
         for (const job of pendingTurnover.splice(0, pendingTurnover.length - QUEUE_LIMIT)) {
-          settlePriceSeries(job.state, job.series, false);
+          settlePriceSeries(job.state, job.series, null);
           dropped.add(job.record);
         }
         setSpikes((current) => current.map((row) => dropped.has(row) ? { ...row, status: "skipped" } : row));
@@ -440,6 +377,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
           if (!Number.isFinite(price) || price <= 0 || !Number.isSafeInteger(tick.E) ||
               tick.E <= (latestPrices.get(tick.s)?.eventTime ?? 0)) continue;
           latestPrices.set(tick.s, { price, eventTime: tick.E });
+          autoOrders.observe(tick.s, { time: tick.E, price });
         }
         if (latestPrices.size !== previousSize) setObservedSymbols(new Set(latestPrices.keys()));
       };
@@ -468,6 +406,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
     return () => {
       lifecycle.abort();
       turnoverScope.abort();
+      autoOrders.stopStrategy(marketSpikeStrategy.id);
       clearTimeout(samplingTimer);
       clearInterval(watchdog);
       clearTimeout(reconnectTimer);
@@ -478,9 +417,24 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
       setOnline(false);
       setObservedSymbols(new Set());
       setSpikes((current) => current.map((row) => row.status === "pending" ? { ...row, status: "interrupted" } : row));
-      setAlerts((previous) => previous.map((row) => row.context === undefined ? { ...row, context: "monitor-stopped" } : row));
     };
-  }, [hasSymbols, addForecastAlerts, notifyStrategy]);
+  }, [autoOrders, hasSymbols, notifyStrategy]);
+
+  async function deleteAlertRecords(records: readonly SpikeIdentity[]) {
+    if (server) await background.deleteSpikes(records);
+    const deleted = new Set(records.map(spikeKey));
+    setSpikes((current) => current.filter((row) => !deleted.has(spikeKey(row))));
+  }
+
+  async function deleteAutoOrderRecords(records: readonly AutoOrderWatchIdentity[]) {
+    if (server) {
+      await background.deleteAutoOrderWatches(records);
+      return;
+    }
+    const deleted = new Set(records.map(autoOrderWatchKey));
+    for (const key of deleted) deletedBrowserOrders.current.add(key);
+    setBrowserOrders((current) => current.filter((row) => !deleted.has(autoOrderWatchKey(row))));
+  }
 
   function toggleDingTalkNotifications() {
     const next = !strategyNotify;
@@ -503,11 +457,15 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
       ? server
         ? "确定启用异动监控？启用后将按当前规则监控行情，关闭网页后仍会继续。"
         : "确定启用异动监控？启用后将按当前规则监控行情，请保持网页打开。"
-      : "确定关闭异动监控？关闭后将停止监控，并取消待处理的成交额核验。";
+      : "确定关闭异动监控？价格监控、待核验告警和自动下单任务会停止，已有仓位会保留。";
     if (!window.confirm(message)) return;
     if (server) {
       saveServerRule({ enabled: next });
       return;
+    }
+    if (!next) {
+      activeSymbols.current = null;
+      autoOrders.stopStrategy(marketSpikeStrategy.id);
     }
     setEnabled(next);
     try {
@@ -627,7 +585,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
           </p>
           {directoryError && <p role="status">合约列表同步失败，正在重试。</p>}
           <div className={styles.monitorHelp}>
-            <p><strong>告警怎么升级？</strong> 价格达到涨跌阈值时，先记入<a href="#spike-records">超阈值记录</a>。每轮只有第一次告警要检查成交额。</p>
+            <p><strong>告警怎么升级？</strong> 价格达到涨跌阈值时，先记入告警记录。每轮只有第一次告警要检查成交额。</p>
             <p>例如窗口设为 30 秒、涨幅设为 5%。价格从 100 涨到 108，成交额达标就报 1 级。下一档从 105 算，再涨 5% 到 110.25 就报 2 级。如果一口气涨到 116，可以直接报 3 级。</p>
             <p>每次升级都会重新计时。窗口内没到下一级，就重新找下一轮异动。上涨和下跌分别计级。</p>
           </div>
@@ -635,62 +593,20 @@ export default function MarketMonitor({ contracts, coinCount, directoryError, sh
             ? "启用后自动启动独立进程，关闭网页后继续监控。"
             : background.mode === "browser" ? "请保持行情页打开。" : ""}</p>
         </section>
-        <details className={styles.turnover}>
-          <summary className={styles.monitorSectionSummary}><h4>告警记录 <span>最近 100 条</span></h4></summary>
-          <p role="status">{displayedAlerts.length ? `最新告警 ${displayedAlerts[0].symbol} ${displayedAlerts[0].level} 级 · ${formatAlertChange.format(displayedAlerts[0].change)}%` : "暂无告警。"}</p>
-          {displayedAlerts.length > 0 && <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
-            <table className={styles.alertTable}>
-              <thead><tr>
-                <th scope="col">交易对</th><th scope="col">告警级别</th><th scope="col">触发时间</th><th scope="col">参考价 (USDT)</th>
-                <th scope="col">触发价 (USDT)</th><th scope="col">涨跌幅</th><th scope="col">阈值</th><th scope="col">窗口 (秒)</th>
-                <th scope="col">窗口成交额 (USDT)</th>
-                <th scope="col">币安全体账户多空比/大户多空持仓比</th>
-                {server && <th scope="col">钉钉送达</th>}
-              </tr></thead>
-              <tbody>
-                {displayedAlerts.map((alert) => {
-                  const { context } = alert;
-                  return <tr key={spikeKey(alert)}>
-                    <th scope="row">{alert.symbol}</th>
-                    <td>{alert.level} 级</td>
-                    <td><time dateTime={new Date(alert.time).toISOString()}>{formatTime.format(alert.time)}</time>
-                      {alert.delivery && <small>确认 {formatTime.format(alert.delivery.confirmedAt)}</small>}</td>
-                    <td title={fullMarketNumber.format(alert.previous)}>{formatPrice(alert.previous)}</td>
-                    <td title={fullMarketNumber.format(alert.price)}>{formatPrice(alert.price)}</td>
-                    <td className={alert.change < 0 ? styles.sell : styles.buy}>{formatAlertChange.format(alert.change)}%</td>
-                    <td>{formatPercent.format(alert.threshold)}%</td>
-                    <td>{alert.seconds}</td>
-                    <td>{alert.volume?.turnover != null && alert.volume.multiple != null
-                      ? <>{formatMarketAmount(alert.volume.turnover)} <small>{formatRatio.format(alert.volume.multiple)} 倍</small></>
-                      : alert.requiredMultiple === null && !alert.delivery ? "升级告警" : "—"}</td>
-                    <td className={styles.alertRatios}>
-                      {context === undefined ? alert.delivery && Date.now() - alert.delivery.confirmedAt > 60_000
-                        ? "—" : "正在补充多空比…" : typeof context === "string" ? <small>{alertContextMessages[context]}</small> : <>
-                        <div>全体 <Ratio data={context.binanceAccounts} /></div>
-                        <div>大户 <Ratio data={context.binancePositions} /></div>
-                      </>}
-                    </td>
-                    {server && <td><Delivery record={alert.delivery} /></td>}
-                  </tr>;
-                })}
-              </tbody>
-            </table>
-          </div>}
-          {displayedAlerts.length > 0 && <p>多空比使用告警时币安最近一期 5 分钟统计。币安大户按保证金余额取前 20%。</p>}
-        </details>
-        <SpikeForecastPanel records={forecasts} />
+        <AlertRecords records={history} canDelete={recordsReady && canEdit} onDelete={deleteAlertRecords} />
+        <StrategyOrderRequests strategyId={marketSpikeStrategy.id}
+          requests={server ? background.data?.autoOrderRequests ?? [] : browserRequests} />
       </div>
     </details>
   );
 
   return (
-    <>
-      <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading" hidden={showRecords}>
-        <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
-        <DingTalkSettings {...strategyNotifications} />
-        {strategy}
-      </section>
-      {showRecords && <SpikeRecords records={displayedSpikes} />}
-    </>
+    <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
+      <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
+      <DingTalkSettings {...strategyNotifications} />
+      {strategy}
+      <AutoOrders records={server ? background.data?.autoOrders ?? [] : browserOrders}
+        canDelete={canEdit} onDelete={deleteAutoOrderRecords} />
+    </section>
   );
 }

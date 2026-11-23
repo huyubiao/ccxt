@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatMarketAmount, formatMarketPriceRange, marketNumberFormatter } from "./market-number.ts";
+import { formatAlertTurnover, formatMarketAmount, formatMarketPriceRange, marketNumberFormatter } from "./market-number.ts";
+
+test("alert turnover displays the baseline and window amount in 万 at any scale", () => {
+  assert.equal(formatAlertTurnover({ baseline: 2500, turnover: 7500, multiple: 3 }), "成交额3倍(0.25万 -> 0.75万)");
+  assert.equal(formatAlertTurnover({ baseline: 100_000_000, turnover: 300_000_000, multiple: 3 }), "成交额3倍(10000万 -> 30000万)");
+  assert.equal(formatAlertTurnover({ baseline: 2500, turnover: 0, multiple: 0 }), "成交额0倍(0.25万 -> 0万)");
+  assert.equal(formatAlertTurnover({ baseline: null, turnover: null, multiple: null }), null);
+  assert.equal(formatAlertTurnover(undefined, 3), "成交额3倍");
+});
 
 test("large market values use 万 and 亿 with exactly three decimal places", () => {
   assert.equal(formatMarketAmount(9_999.46), "9,999.46");

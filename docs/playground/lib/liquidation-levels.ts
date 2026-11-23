@@ -1,9 +1,6 @@
 export const LIQUIDATION_INTERVAL_MS = 5 * 60_000;
 export const LIQUIDATION_LOOKBACK_MS = 24 * 60 * 60_000;
 export const LIQUIDATION_POSITION_HISTORY_MS = LIQUIDATION_LOOKBACK_MS;
-export const LIQUIDATION_BACKTEST_HOURS = 24;
-export const LIQUIDATION_BACKTEST_MS = LIQUIDATION_BACKTEST_HOURS * 60 * 60_000;
-export const LIQUIDATION_SNAPSHOT_LEAD_MS = LIQUIDATION_INTERVAL_MS;
 export const LIQUIDATION_RISK_BAND_SHARES = { elevated: 0.0025, high: 0.03, extreme: 0.06 } as const;
 export const LIQUIDATION_REFRESH_MS = 60_000;
 export const LIQUIDATION_DOUBLE_OPEN_CLOSE_SHARE = 0.50;
@@ -291,13 +288,6 @@ export function normalizeOpenInterest(rows: { timestamp?: unknown; sumOpenIntere
     .sort((a, b) => a.time - b.time);
 }
 
-export function latestOpenInterestChange(points: InterestPoint[], asOf: number) {
-  const latest = points.findLast(({ time, quantity }) => time <= asOf && quantity > 0);
-  if (!latest || asOf - latest.time > 2 * LIQUIDATION_INTERVAL_MS) return null;
-  const previous = points.findLast(({ time, quantity }) => time === latest.time - LIQUIDATION_INTERVAL_MS && quantity > 0);
-  return previous ? { time: latest.time, change: (latest.quantity / previous.quantity - 1) * 100 } : null;
-}
-
 export type LiquidationBand = {
   side: Side;
   lowerPrice: number;
@@ -312,12 +302,6 @@ export type LiquidationBand = {
 export type LiquidationRiskBand = LiquidationBand & {
   openInterestShare: number;
   riskLevel: "low" | keyof typeof LIQUIDATION_RISK_BAND_SHARES;
-};
-
-export type LiquidationRiskSnapshot = {
-  time: number;
-  asOf: number;
-  bands: Pick<LiquidationRiskBand, "side" | "lowerPrice" | "upperPrice" | "openInterestShare" | "riskLevel">[];
 };
 
 export const LIQUIDATION_LARGE_ZONE_PEAK_SHARE = 0.20;
@@ -755,10 +739,9 @@ function buildLiquidationBands(cohorts: Cohort[], markPrice: number, openInteres
   return { levels, coveredQuantity };
 }
 
-function* liquidationReplaySteps(symbol: string, interest: InterestPoint[], bars: MarkBar[],
+export function replayLiquidations(symbol: string, interest: InterestPoint[], bars: MarkBar[],
   warmup: number, from: number, to: number, capitalization: MarketCapHistory | null,
-  marginProfile: MarginProfile | null, calibration?: LiquidationWeightCalibration, onLiquidation?: LiquidationTrace,
-  includeRiskSnapshots = false) {
+  marginProfile: MarginProfile | null = null, calibration?: LiquidationWeightCalibration, onLiquidation?: LiquidationTrace) {
   const step = LIQUIDATION_INTERVAL_MS;
   if (warmup > from || from >= to || [warmup, from, to].some((time) => !Number.isSafeInteger(time) || time % step !== 0)) {
     throw new Error("Invalid liquidation replay window.");
@@ -769,25 +752,12 @@ function* liquidationReplaySteps(symbol: string, interest: InterestPoint[], bars
   const totals = { long: 0, short: 0 };
   const intervals: { time: number; low: number; high: number; openInterestChange: number; long: number; short: number;
     volumeBreakdown: ReturnType<typeof splitTradeVolume> }[] = [];
-  const riskSnapshots: LiquidationRiskSnapshot[] = [];
   let cohorts: Cohort[] = [];
   for (let time = warmup; time < to; time += step) {
     const bar = markBars.get(time);
     const previous = points.get(time);
     const point = points.get(time + step);
     if (!bar || !previous || !point) throw new Error("A liquidation replay interval is missing.");
-    const target = time + LIQUIDATION_SNAPSHOT_LEAD_MS;
-    if (includeRiskSnapshots && target >= from && target < to) {
-      const mark = markBars.get(time - step)?.close;
-      if (mark && time > warmup) {
-        const { levels } = buildLiquidationBands(cohorts, mark, previous.quantity, mark, mark,
-          time - LIQUIDATION_POSITION_HISTORY_MS);
-        const bands = levels.filter(({ riskLevel }) => riskLevel === "high" || riskLevel === "extreme")
-          .map(({ side, lowerPrice, upperPrice, openInterestShare, riskLevel }) =>
-            ({ side, lowerPrice, upperPrice, openInterestShare, riskLevel }));
-        riskSnapshots.push({ time: target, asOf: time, bands });
-      }
-    }
     const interval = { time, low: bar.low, high: bar.high, openInterestChange: point.quantity - previous.quantity, long: 0, short: 0 };
     const groups = groupPositionExits(cohorts, bar, time - LIQUIDATION_POSITION_HISTORY_MS, time >= from ? onLiquidation : undefined);
     const volumeBreakdown = applyInterestChange(cohorts, previous, point, bar, weightingAt(point.time).weights, marginProfile, groups);
@@ -798,33 +768,9 @@ function* liquidationReplaySteps(symbol: string, interest: InterestPoint[], bars
       totals.long += interval.long;
       totals.short += interval.short;
     }
-    if ((time - warmup) / step % 64 === 63) yield;
   }
   return { model: liquidationModel, calibrationId: calibration?.id ?? null,
-    ...totals, total: totals.long + totals.short, capitalization, marginProfile, positionExitScenario, intervals, riskSnapshots };
-}
-
-export function replayLiquidations(symbol: string, interest: InterestPoint[], bars: MarkBar[],
-  warmup: number, from: number, to: number, capitalization: MarketCapHistory | null,
-  marginProfile: MarginProfile | null = null, calibration?: LiquidationWeightCalibration, onLiquidation?: LiquidationTrace) {
-  const steps = liquidationReplaySteps(symbol, interest, bars, warmup, from, to, capitalization, marginProfile, calibration, onLiquidation);
-  let state = steps.next();
-  while (!state.done) state = steps.next();
-  return state.value;
-}
-
-export async function replayLiquidationsAsync(symbol: string, interest: InterestPoint[], bars: MarkBar[],
-  warmup: number, from: number, to: number, capitalization: MarketCapHistory | null,
-  marginProfile: MarginProfile | null = null, calibration?: LiquidationWeightCalibration, includeRiskSnapshots = false) {
-  const steps = liquidationReplaySteps(symbol, interest, bars, warmup, from, to, capitalization, marginProfile, calibration,
-    undefined, includeRiskSnapshots);
-  let state = steps.next();
-  while (!state.done) {
-    // Let pending source responses and their timeouts advance during CPU-heavy replays.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    state = steps.next();
-  }
-  return state.value;
+    ...totals, total: totals.long + totals.short, capitalization, marginProfile, positionExitScenario, intervals };
 }
 
 export function estimateLiquidationLevels(

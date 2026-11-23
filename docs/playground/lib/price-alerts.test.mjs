@@ -1,10 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
+  alertDayStart, forecastAlertDirection, getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
   recordDirectionalPrice, recordPrice, recordPriceLevel,
   restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries,
 } from "./price-alerts.ts";
+
+const checkedVolume = { turnover: 390_000, baseline: 120_000, multiple: 3.25 };
+
+test("alert daily changes use the Beijing calendar day of the trigger", () => {
+  const midnight = Date.UTC(2026, 10, 23, 16);
+  assert.equal(alertDayStart(midnight - 1), Date.UTC(2026, 10, 22, 16));
+  assert.equal(alertDayStart(midnight), midnight);
+  assert.equal(alertDayStart(midnight + 12 * 3_600_000), midnight);
+});
+
+test("the forecast follows the move since the trigger, using the alert move when the price is unchanged", () => {
+  const rise = { price: 105, change: 5 };
+  const fall = { price: 95, change: -5 };
+  assert.equal(forecastAlertDirection(rise, 106), "up");
+  assert.equal(forecastAlertDirection(rise, 104), "down");
+  assert.equal(forecastAlertDirection(fall, 94), "down");
+  assert.equal(forecastAlertDirection(fall, 96), "up");
+  assert.equal(forecastAlertDirection(rise), "up");
+  assert.equal(forecastAlertDirection(fall, 95), "down");
+});
 
 test("an overshoot uses the threshold price as the base for the next level", () => {
   const state = { samples: [] };
@@ -14,12 +34,13 @@ test("an overshoot uses the threshold price as the base for the next level", () 
   assert.equal(first.needsTurnover, true);
   assert.equal(first.move.level, 1);
   assert.equal(first.move.target, 105);
-  assert.equal(settlePriceSeries(state, first.series, true), first.move);
+  assert.equal(settlePriceSeries(state, first.series, checkedVolume), first.move);
   assert.equal(tick(40000, 110.24), null);
   const second = tick(41000, 110.25);
   assert.equal(second.needsTurnover, false);
   assert.equal(second.move.level, 2);
   assert.equal(second.move.previous, 105);
+  assert.deepEqual(second.volume, checkedVolume);
   assert.equal(tick(70000, 116).move.level, 3);
 });
 
@@ -31,7 +52,7 @@ test("fast moves can skip levels in both directions, including the first alert",
     const first = tick(2000, firstPrice);
     assert.equal(first.move.level, 3);
     assert.equal(first.needsTurnover, true);
-    settlePriceSeries(state, first.series, true);
+    settlePriceSeries(state, first.series, checkedVolume);
     const next = tick(3000, nextPrice);
     assert.equal(next.move.level, 5);
     assert.equal(next.needsTurnover, false);
@@ -47,9 +68,12 @@ test("higher levels reached while turnover is pending wait for the first check",
     assert.equal(tick(3000, 116), null);
     assert.equal(tick(2500, 125), null);
     assert.equal(tick(4000, 110), null);
-    const latest = settlePriceSeries(state, first.series, passed);
+    const latest = settlePriceSeries(state, first.series, passed ? checkedVolume : null);
     assert.equal(latest?.level, passed ? 3 : undefined);
-    if (passed) assert.equal(latest.sample.time, 3000);
+    if (passed) {
+      assert.equal(latest.sample.time, 3000);
+      assert.equal(forecastAlertDirection({ price: latest.sample.price, change: latest.change }, state.samples.at(-1).price), "down");
+    }
     const next = tick(5000, 122);
     assert.equal(next.needsTurnover, !passed);
     assert.equal(next.move.level, passed ? 4 : 2);
@@ -66,9 +90,9 @@ test("an expired series cannot bypass the next series' turnover check", () => {
   assert.equal(next.needsTurnover, true);
   assert.equal(next.move.level, 1);
   assert.equal(next.move.previous, 108);
-  settlePriceSeries(state, first.series, true);
+  settlePriceSeries(state, first.series, checkedVolume);
   assert.equal(tick(33000, 120), null);
-  assert.equal(settlePriceSeries(state, next.series, true).level, 2);
+  assert.equal(settlePriceSeries(state, next.series, checkedVolume).level, 2);
 });
 
 test("turnover settings require a finite multiple greater than one", () => {

@@ -4,6 +4,8 @@ export const MAX_ALERT_SECONDS = 300;
 export const MIN_ALERT_PERCENT = 2;
 export const DEFAULT_TURNOVER_MULTIPLE = 3;
 export const TURNOVER_BASELINE_MINUTES = 60;
+export const ALERT_DAY_MS = 24 * 60 * 60 * 1000;
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 type Sample = { time: number; price: number };
 type LevelSample = Sample & { sampledAt?: number };
@@ -11,7 +13,7 @@ export type PriceAlertState = { samples: Sample[]; baseline?: Sample };
 export type DirectionalAlertState = { up: PriceAlertState; down: PriceAlertState };
 export type DirectionalThresholds = { up: number | null; down: number | null };
 export type PriceAlertLevel = { level: number; previous: number; target: number; sample: LevelSample; change: number };
-export type PriceAlertSeries = { latest: PriceAlertLevel; confirmed: boolean };
+export type PriceAlertSeries = { latest: PriceAlertLevel; volume?: AlertVolume };
 export type LeveledPriceState = PriceAlertState & { series?: PriceAlertSeries };
 export type AlertRatio = { ratio: number; long: number; short: number; time: number };
 export type AlertMarketContext = {
@@ -20,6 +22,9 @@ export type AlertMarketContext = {
   binancePositions: AlertRatio | null;
 };
 export type AlertTurnover = { turnover: number | null; baseline: number | null };
+export type AlertVolume = AlertTurnover & { multiple: number | null };
+export const alertForecastLabels = { up: "上涨", down: "下跌" };
+export type AlertForecastDirection = keyof typeof alertForecastLabels;
 export type SpikeRecord = {
   symbol: string;
   time: number;
@@ -31,11 +36,23 @@ export type SpikeRecord = {
   level: number;
   requiredMultiple: number | null;
   status: "pending" | "alerted" | "upgraded" | "below-threshold" | "unavailable" | "skipped" | "interrupted";
-  volume?: AlertTurnover & { multiple: number | null };
+  volume?: AlertVolume;
 };
 
-export function spikeKey({ symbol, time, threshold }: Pick<SpikeRecord, "symbol" | "time" | "threshold">) {
+export type SpikeIdentity = Pick<SpikeRecord, "symbol" | "time" | "threshold">;
+
+export function spikeKey({ symbol, time, threshold }: SpikeIdentity) {
   return `${symbol}:${time}:${threshold}`;
+}
+
+export function alertDayStart(time: number) {
+  return Math.floor((time + BEIJING_OFFSET_MS) / ALERT_DAY_MS) * ALERT_DAY_MS - BEIJING_OFFSET_MS;
+}
+
+export function forecastAlertDirection({ price, change }: Pick<SpikeRecord, "price" | "change">,
+  latestPrice = price): AlertForecastDirection {
+  if (latestPrice !== price) return latestPrice > price ? "up" : "down";
+  return change > 0 ? "up" : "down";
 }
 
 export function parseTurnoverMultiple(value: string): number | null {
@@ -155,7 +172,7 @@ export function recordPriceLevel(state: LeveledPriceState, sample: LevelSample, 
       state.samples.length = 0;
     }
     state.samples.push(sample);
-    return move && series.confirmed ? { move, series, needsTurnover: false } : null;
+    return move && series.volume ? { move, needsTurnover: false as const, volume: series.volume } : null;
   }
 
   if (series) {
@@ -165,14 +182,14 @@ export function recordPriceLevel(state: LeveledPriceState, sample: LevelSample, 
   const result = recordPrice(state, sample, threshold, seconds);
   const move = result?.triggered ? crossedLevel(result.reference.price, 0, sample, threshold) : null;
   if (!move) return null;
-  const started = { latest: move, confirmed: false };
+  const started = { latest: move };
   state.series = started;
-  return { move, series: started, needsTurnover: true };
+  return { move, series: started, needsTurnover: true as const };
 }
 
-export function settlePriceSeries(state: LeveledPriceState, series: PriceAlertSeries, passed: boolean) {
-  if (passed) {
-    series.confirmed = true;
+export function settlePriceSeries(state: LeveledPriceState, series: PriceAlertSeries, volume: AlertVolume | null) {
+  if (volume) {
+    series.volume = volume;
     return series.latest;
   }
   if (state.series === series) {

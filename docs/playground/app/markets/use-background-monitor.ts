@@ -2,21 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
+import type { AutoOrderWatchIdentity } from "@/lib/auto-order";
 import type { BackgroundMonitorStatus, BackgroundRule } from "@/lib/background-monitor-types";
 import { readMarketResponse } from "@/lib/market-response";
+import type { SpikeIdentity } from "@/lib/price-alerts";
 
 const endpoint = apiUrl("/api/markets/background-monitor");
+type UpdateBody = BackgroundRule | readonly SpikeIdentity[] | { autoOrderWatches: readonly AutoOrderWatchIdentity[] };
 
 export function useBackgroundMonitor() {
   const [mode, setMode] = useState<"loading" | "local" | "browser">("loading");
   const [data, setData] = useState<BackgroundMonitorStatus | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [mutation, setMutation] = useState<"PUT" | "DELETE" | null>(null);
   const [readError, setReadError] = useState("");
   const [saveError, setSaveError] = useState("");
   const updating = useRef(false);
 
   useEffect(() => {
-    if (mode === "browser" || saving) return;
+    if (mode === "browser" || mutation) return;
     const request = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -49,27 +52,44 @@ export function useBackgroundMonitor() {
       request.abort();
       clearTimeout(timer);
     };
-  }, [mode, saving]);
+  }, [mode, mutation]);
 
-  async function save(rule: BackgroundRule) {
-    if (updating.current) return;
+  async function update(method: "PUT" | "DELETE", body: UpdateBody, message: string) {
+    if (updating.current) throw new Error("另一项后台监控操作正在进行，请稍后重试。");
     updating.current = true;
-    setSaving(true);
-    setSaveError("");
+    setMutation(method);
     try {
       const response = await fetch(endpoint, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rule),
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });
-      setData(await readMarketResponse<BackgroundMonitorStatus>(response, "无法保存异动监控设置。"));
+      setData(await readMarketResponse<BackgroundMonitorStatus>(response, message));
       setReadError("");
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "无法保存异动监控设置。");
     } finally {
       updating.current = false;
-      setSaving(false);
+      setMutation(null);
     }
   }
 
-  return { mode, data, saving, error: saveError || readError, save };
+  async function save(rule: BackgroundRule) {
+    if (updating.current) return;
+    setSaveError("");
+    const message = "无法保存异动监控设置。";
+    try {
+      await update("PUT", rule, message);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : message);
+    }
+  }
+
+  function deleteSpikes(records: readonly SpikeIdentity[]) {
+    return update("DELETE", records, "无法删除告警记录。");
+  }
+
+  function deleteAutoOrderWatches(records: readonly AutoOrderWatchIdentity[]) {
+    return update("DELETE", { autoOrderWatches: records }, "无法删除自动下单任务记录。");
+  }
+
+  return { mode, data, saving: mutation === "PUT", deleting: mutation === "DELETE", error: saveError || readError,
+    save, deleteSpikes, deleteAutoOrderWatches };
 }

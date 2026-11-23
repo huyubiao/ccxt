@@ -1,16 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket, type Dispatcher } from "undici";
+import { createAutoOrderMonitor, marketSpikeStrategy } from "./auto-order";
+import { startAutoOrderThread } from "./auto-order-thread";
 import { openBackgroundStore } from "./background-monitor-store";
 import type { BackgroundAlert, BackgroundRule } from "./background-monitor-types";
 import { getBinanceAlertRatios } from "./binance-alert-ratios";
 import { getBinanceFuturesInstruments } from "./binance-markets";
 import { getAlertTurnoverComparison } from "./binance-volume";
 import type { MarketInstrument } from "./market-lookup";
-import { getTurnoverMultiple, recordPriceLevel, settlePriceSeries, type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries,
-  type SpikeRecord } from "./price-alerts";
+import {
+  getTurnoverMultiple, recordPriceLevel, settlePriceSeries,
+  type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries, type SpikeRecord,
+} from "./price-alerts";
 import { VOLUME_DELAY_MS } from "./short-volume";
-import { formatNotificationEvent } from "./strategy-notification-events";
+import { createMarketSpikeEvent, formatNotificationEvent } from "./strategy-notification-events";
 import { strategyNotifier } from "./strategy-notifications";
 
 const stream = "wss://fstream.binance.com/market/ws/!miniTicker@arr";
@@ -20,10 +24,10 @@ const concurrency = 2;
 const maxQueueAge = 15_000;
 
 type Tick = { e?: string; s?: string; c?: string; E?: number; st?: number };
-type Job = { pair: MarketInstrument; event: BackgroundAlert; state: LeveledPriceState; series: PriceAlertSeries };
+type Job = { pair: MarketInstrument; event: ReturnType<typeof alert>; state: LeveledPriceState; series: PriceAlertSeries };
 
-function alert(pair: MarketInstrument, move: PriceAlertLevel, threshold: number, seconds: number): BackgroundAlert {
-  return { kind: "market-spike", symbol: pair.id, time: move.sample.time, level: move.level,
+function alert(pair: MarketInstrument, move: PriceAlertLevel, threshold: number, seconds: number) {
+  return { symbol: pair.id, time: move.sample.time, level: move.level,
     previous: move.previous, price: move.sample.price, change: move.change, threshold, seconds };
 }
 
@@ -45,7 +49,7 @@ export function createBackgroundDetector(rule: BackgroundRule, confirm: (event: 
       if (!result) continue;
       const event = alert(pair, result.move, threshold, rule.seconds);
       if (result.needsTurnover) schedule({ pair, event, state: state[direction], series: result.series });
-      else confirm(event);
+      else confirm(createMarketSpikeEvent(event, result.volume, price));
     }
   };
 }
@@ -53,6 +57,12 @@ export function createBackgroundDetector(rule: BackgroundRule, confirm: (event: 
 export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dispatcher, exitWhenDisabled = false) {
   const store = openBackgroundStore();
   const owner = randomUUID();
+  let stopVersion = store.autoOrderStopVersion(marketSpikeStrategy.id);
+  const autoOrders = createAutoOrderMonitor(
+    startAutoOrderThread, (watch) => store.saveAutoOrderWatch(owner, watch, watch.strategy.id === marketSpikeStrategy.id ? stopVersion : 0),
+    (request) => store.recordAutoOrderRequest(owner, request, request.strategyId === marketSpikeStrategy.id ? stopVersion : 0),
+  );
+  let acquired = false;
   let currentRule = "";
   let scope = new AbortController();
   let socket: WebSocket | undefined;
@@ -81,25 +91,32 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
 
   function trackRule(rule: BackgroundRule) {
     const key = JSON.stringify(rule);
-    if (key === currentRule) return;
+    const version = store.autoOrderStopVersion(marketSpikeStrategy.id);
+    if (key === currentRule && version === stopVersion) return;
+    if (version !== stopVersion) {
+      autoOrders.stopStrategy(marketSpikeStrategy.id);
+      stopVersion = version;
+    }
     currentRule = key;
     clearWindow();
     nextConnection = 0;
   }
 
-  function logSpike(event: BackgroundAlert, status: SpikeRecord["status"], requiredMultiple: number | null,
+  function logSpike(event: Job["event"], status: SpikeRecord["status"], requiredMultiple: number | null,
     volume?: SpikeRecord["volume"]) {
     store.recordSpike({ ...event, status, requiredMultiple, volume });
   }
 
-  function confirm(event: BackgroundAlert, rule: BackgroundRule, volume?: SpikeRecord["volume"], requiredMultiple: number | null = null) {
+  function confirm(event: BackgroundAlert, rule: BackgroundRule, requiredMultiple: number | null = null) {
     const persisted = store.rule();
-    if (JSON.stringify(persisted) !== currentRule || !persisted.enabled) return;
+    if (JSON.stringify(persisted) !== currentRule || !persisted.enabled ||
+        store.autoOrderStopVersion(marketSpikeStrategy.id) !== stopVersion) return;
     const message = formatNotificationEvent(event);
     if (message?.deduplicationKey) {
-      logSpike(event, "alerted", requiredMultiple, volume);
+      logSpike(event, "alerted", requiredMultiple, event.volume);
       const id = message.deduplicationKey;
-      if (store.record(id, event, Date.now(), rule.notify)) {
+      const signal = { strategy: marketSpikeStrategy, symbol: event.symbol, time: event.time };
+      if (store.record(id, event, Date.now(), rule.notify, signal, stopVersion)) {
         if (pendingContext.length < queueLimit) pendingContext.push({ id, event });
         else store.saveContext(id, "queue-skipped");
       }
@@ -111,7 +128,7 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
       pending.push(job);
       logSpike(job.event, "pending", rule.turnoverMultiple);
     } else {
-      settlePriceSeries(job.state, job.series, false);
+      settlePriceSeries(job.state, job.series, null);
       logSpike(job.event, "skipped", rule.turnoverMultiple);
     }
   }
@@ -124,17 +141,19 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
       if (request.aborted || signal.aborted) return;
       const multiple = getTurnoverMultiple(data);
       const timely = Date.now() - event.time <= maxQueueAge + 10_000;
-      const move = settlePriceSeries(state, series, timely && multiple !== null && multiple >= rule.turnoverMultiple);
       const volume = { ...data, multiple };
+      const passed = timely && multiple !== null && multiple >= rule.turnoverMultiple;
+      const move = settlePriceSeries(state, series, passed ? volume : null);
       if (move) {
+        const confirmed = createMarketSpikeEvent(alert(pair, move, event.threshold, rule.seconds), volume, state.samples.at(-1)?.price);
         const upgraded = move.level !== event.level;
         if (upgraded) logSpike(event, "upgraded", rule.turnoverMultiple, volume);
-        confirm({ ...alert(pair, move, event.threshold, rule.seconds), multiple }, rule, volume, upgraded ? null : rule.turnoverMultiple);
+        confirm(confirmed, rule, upgraded ? null : rule.turnoverMultiple);
       } else {
         logSpike(event, !timely || multiple === null ? "unavailable" : "below-threshold", rule.turnoverMultiple, volume);
       }
     } catch {
-      settlePriceSeries(state, series, false);
+      settlePriceSeries(state, series, null);
       if (!request.aborted && !signal.aborted) logSpike(event, "unavailable", rule.turnoverMultiple);
     }
   }
@@ -143,7 +162,7 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
     while (active < concurrency && pending.length) {
       const job = pending.shift()!;
       if (Date.now() - job.event.time > maxQueueAge) {
-        settlePriceSeries(job.state, job.series, false);
+        settlePriceSeries(job.state, job.series, null);
         logSpike(job.event, "unavailable", rule.turnoverMultiple);
         continue;
       }
@@ -175,7 +194,10 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
             tick.E > lastFrame + 5_000 || tick.E < lastFrame - 15_000) continue;
         const pair = pairs.get(tick.s);
         const price = Number(tick.c);
-        if (pair && Number.isFinite(price) && price > 0) observe(pair, tick.E, price);
+        if (pair && Number.isFinite(price) && price > 0) {
+          observe(pair, tick.E, price);
+          autoOrders.observe(pair.id, { time: tick.E, price });
+        }
       }
       drain(rule);
     });
@@ -208,12 +230,20 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
       if (!rule.enabled && exitWhenDisabled) break;
       const state = !rule.enabled ? "idle" : socket?.readyState === WebSocket.OPEN ? "connected" : "connecting";
       if (!store.heartbeat(owner, state, now)) break;
+      if (!acquired) {
+        store.stopAutoOrderWatches(owner);
+        acquired = true;
+      }
       trackRule(rule);
       if (now >= nextPrune) {
         store.prune(now);
         nextPrune = now + 3_600_000;
       }
       if (rule.enabled) {
+        for (const { id, signal } of store.pendingAutoOrderSignals()) {
+          autoOrders.submit(signal);
+          store.finishAutoOrderSignal(id, owner);
+        }
         if (!loadingDirectory && now >= nextDirectory) {
           loadingDirectory = true;
           nextDirectory = now + 60_000;
@@ -231,7 +261,7 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
         if (rule.notify && !delivery) {
           delivery = deliver().catch(() => { console.error("后台告警送达状态写入失败。"); }).finally(() => { delivery = undefined; });
         }
-      }
+      } else autoOrders.stopStrategy(marketSpikeStrategy.id);
       if (!loadContext && pendingContext.length) {
         loadContext = loadRatios(pendingContext.shift()!).catch(() => {
           console.error("无法写入告警多空比。");
@@ -242,6 +272,7 @@ export async function runBackgroundMonitor(signal: AbortSignal, dispatcher?: Dis
   } catch (error) {
     if (!signal.aborted) throw error;
   } finally {
+    autoOrders.stop();
     clearWindow();
     await Promise.all([delivery, loadContext]);
     store.release(owner);

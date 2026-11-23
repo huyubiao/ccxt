@@ -3,6 +3,7 @@ import {
   type AlertMarketContext, type DirectionalThresholds, type SpikeRecord,
 } from "./price-alerts";
 import type { StrategyNotificationEvent } from "./strategy-notification-events";
+import type { AutoOrderRequest, AutoOrderWatch } from "./auto-order";
 
 export type BackgroundAlert = Extract<StrategyNotificationEvent, { kind: "market-spike" }> & {
   context?: AlertMarketContext | "request-failed" | "queue-skipped";
@@ -30,6 +31,8 @@ export type BackgroundMonitorStatus = {
   worker: "offline" | "idle" | "connecting" | "connected";
   records: BackgroundRecord[];
   spikes: SpikeRecord[];
+  autoOrders: AutoOrderWatch[];
+  autoOrderRequests: AutoOrderRequest[];
 };
 
 export const defaultBackgroundRule: BackgroundRule = {
