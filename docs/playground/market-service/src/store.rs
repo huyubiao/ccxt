@@ -30,6 +30,11 @@ impl Store {
         Self::open(&path)
     }
 
+    #[cfg(test)]
+    pub fn open_memory() -> Result<Self> {
+        Self::open(Path::new(":memory:"))
+    }
+
     fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path
             .parent()
@@ -299,6 +304,44 @@ impl Store {
         self.db()?.execute("UPDATE monitor_alert SET delivery=?,nextAttempt=?,lastResult=? WHERE id=? AND attempts=? AND delivery='sending'",
             params![if retry {"queued"} else {status}, now + delivery.attempts * 60_000, status, delivery.id, delivery.attempts])?;
         Ok(())
+    }
+
+    /// Inserts or replaces one trade managed by the execution engine.
+    pub fn save_trade(&self, trade: &Value) -> Result<()> {
+        let id = trade["id"].as_str().ok_or("trade id missing")?;
+        let symbol = trade["symbol"].as_str().ok_or("trade symbol missing")?;
+        let status = trade["status"].as_str().ok_or("trade status missing")?;
+        let opened_at = trade["openedAt"].as_i64().ok_or("trade time missing")?;
+        self.db()?.execute(
+            "INSERT INTO trade VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+                symbol = excluded.symbol, status = excluded.status, data = excluded.data",
+            params![id, symbol, status, opened_at, serde_json::to_string(trade)?],
+        )?;
+        Ok(())
+    }
+
+    /// Trades whose position may still exist on the exchange.
+    pub fn active_trades(&self) -> Result<Vec<Value>> {
+        query_json(
+            &*self.db()?,
+            "SELECT data FROM trade WHERE status IN ('opening', 'open', 'closing') ORDER BY openedAt",
+            [],
+        )
+    }
+
+    pub fn trade(&self, id: &str) -> Result<Option<Value>> {
+        Ok(query_json(&*self.db()?, "SELECT data FROM trade WHERE id = ?", [id])?
+            .into_iter()
+            .next())
+    }
+
+    pub fn recent_trades(&self, limit: i64) -> Result<Vec<Value>> {
+        query_json(
+            &*self.db()?,
+            "SELECT data FROM trade ORDER BY CASE WHEN status IN ('opening', 'open', 'closing') THEN 0 ELSE 1 END,
+                openedAt DESC LIMIT ?",
+            [limit],
+        )
     }
 
     pub fn prune(&self, now: i64) -> Result<()> {

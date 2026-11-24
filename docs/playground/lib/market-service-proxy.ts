@@ -3,7 +3,13 @@ import { Agent } from "undici";
 type RustMarketRoute = "/api/markets/contracts" | "/api/markets/alert-context" |
   "/api/markets/background-monitor" | "/api/strategy-notifications" | "/api/markets/directory" |
   "/api/markets/ticker" | "/api/markets/order-book" | "/api/markets/funding-rates" | "/api/markets/liquidations" |
-  "/api/markets/volume" | "/api/markets/contract-market-caps" | "/api/markets/fundamentals" | "/api/markets/holders";
+  "/api/markets/volume" | "/api/markets/contract-market-caps" | "/api/markets/fundamentals" | "/api/markets/holders" |
+  TradingRoute;
+type TradingRoute = "/api/trading" | "/api/trading/test-order" | "/api/trading/close";
+const localRoutes = new Set<RustMarketRoute>([
+  "/api/markets/background-monitor", "/api/strategy-notifications",
+  "/api/trading", "/api/trading/test-order", "/api/trading/close",
+]);
 
 const loopbackAgent = new Agent();
 
@@ -15,7 +21,7 @@ export async function proxyMarketRequest(route: RustMarketRoute, request: Reques
     endpoint.search = new URL(request.url).search;
     const headers = new Headers();
     if (body !== undefined) headers.set("content-type", "application/json");
-    const requiresToken = route === "/api/markets/background-monitor" || route === "/api/strategy-notifications";
+    const requiresToken = localRoutes.has(route);
     if (requiresToken) {
       const token = process.env.PLAYGROUND_MARKET_SERVICE_TOKEN ?? "";
       if (!/^[a-f0-9]{64}$/i.test(token) || endpoint.protocol !== "http:" ||

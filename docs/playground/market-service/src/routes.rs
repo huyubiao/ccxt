@@ -5,7 +5,7 @@ use axum::extract::{rejection::JsonRejection, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,6 +17,7 @@ use crate::notifications::{format_event, Notifier};
 use crate::now_ms;
 use crate::store::Store;
 use crate::strategy::{Rule, MAX_WINDOW_SECONDS, MIN_WINDOW_SECONDS};
+use crate::trading::Trader;
 
 const DAY_MS: i64 = 86_400_000;
 const BEIJING_OFFSET_MS: i64 = 28_800_000;
@@ -30,12 +31,14 @@ struct Service {
     liquidation: Arc<crate::liquidation::Loader>,
     research: Arc<crate::research::Research>,
     holders: Arc<crate::holders::Holders>,
+    trader: Option<Arc<Trader>>,
 }
 
 pub fn router(
     binance: Arc<Binance>,
     store: Option<Arc<Store>>,
     notifier: Arc<Notifier>,
+    trader: Option<Arc<Trader>>,
     token: Option<Arc<str>>,
 ) -> crate::store::Result<Router> {
     let markets = Arc::new(Markets::new(Arc::clone(&binance))?);
@@ -59,6 +62,9 @@ pub fn router(
                 .put(notification_settings)
                 .post(notification_send),
         )
+        .route("/api/trading", get(trading_status))
+        .route("/api/trading/test-order", post(trading_test_order))
+        .route("/api/trading/close", post(trading_close))
         .route_layer(middleware::from_fn_with_state(token, require_local_token));
     Ok(Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
@@ -82,6 +88,7 @@ pub fn router(
             liquidation,
             research,
             holders,
+            trader,
         }))
 }
 
@@ -588,6 +595,65 @@ async fn notification_send(
     notification_response(code, status)
 }
 
+async fn trading_status(State(state): State<Service>) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "下单仅在本地设置模式下可用。"));
+    };
+    no_store(Json(trader.status().await).into_response())
+}
+
+async fn trading_test_order(
+    State(state): State<Service>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "下单仅在本地设置模式下可用。"));
+    };
+    if !has_json(&headers) {
+        return no_store(error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "需要 JSON 格式的下单参数。"));
+    }
+    if body_too_large(&body) {
+        return no_store(error(StatusCode::PAYLOAD_TOO_LARGE, "请求体过大。"));
+    }
+    let Some(request) = body
+        .ok()
+        .and_then(|Json(value)| serde_json::from_value::<crate::test_strategy::Request>(value).ok())
+    else {
+        return no_store(error(StatusCode::BAD_REQUEST, "请检查交易对、方向、金额、杠杆、止损止盈和持仓时间。"));
+    };
+    let result = match crate::test_strategy::intent(&state.binance, request).await {
+        Ok(intent) => trader.submit(intent).await,
+        Err(message) => Err(message),
+    };
+    trading_response(result)
+}
+
+async fn trading_close(
+    State(state): State<Service>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "下单仅在本地设置模式下可用。"));
+    };
+    if !has_json(&headers) {
+        return no_store(error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "需要 JSON 格式的请求。"));
+    }
+    let id = body.ok().and_then(|Json(value)| value["tradeId"].as_str().map(str::to_owned));
+    let Some(id) = id.filter(|id| text_within(&json!(id), 200)) else {
+        return no_store(error(StatusCode::BAD_REQUEST, "请选择要平仓的交易。"));
+    };
+    trading_response(trader.close(&id).await)
+}
+
+fn trading_response(result: Result<Value, String>) -> Response {
+    match result {
+        Ok(trade) => no_store(Json(json!({"trade": trade})).into_response()),
+        Err(message) => no_store(error(StatusCode::UNPROCESSABLE_ENTITY, &message)),
+    }
+}
+
 fn notification_response(code: StatusCode, status: &str) -> Response {
     no_store((code, Json(json!({"status":status}))).into_response())
 }
@@ -659,6 +725,7 @@ mod tests {
             Arc::new(Binance::new()),
             None,
             Arc::new(Notifier::new(false).unwrap()),
+            None,
             Some(token.clone()),
         )
         .unwrap();
@@ -685,6 +752,9 @@ mod tests {
             (monitor, Method::GET),
             (monitor, Method::PUT),
             (monitor, Method::DELETE),
+            ("/api/trading", Method::GET),
+            ("/api/trading/test-order", Method::POST),
+            ("/api/trading/close", Method::POST),
         ] {
             assert_eq!(
                 call(path, method, None, None).await.unwrap().status(),

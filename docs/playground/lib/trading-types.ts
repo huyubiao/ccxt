@@ -1,0 +1,82 @@
+/** Mirrors `market-service/src/trading.rs`. */
+export type TradingMode = "off" | "demo" | "live";
+export type TradeSide = "long" | "short";
+export type TradeStatus = "opening" | "open" | "closing" | "closed" | "failed";
+
+export type TradeOrder = {
+  kind: "entry" | "stop-loss" | "take-profit" | "exit";
+  side: "buy" | "sell";
+  amount: number;
+  triggerPrice: number | null;
+  exchangeId: string | null;
+  average: number | null;
+  status: "placed" | "filled" | "canceled" | "triggered" | "failed";
+  error: string | null;
+  time: number;
+};
+
+export type Trade = {
+  id: string;
+  strategy: { id: string; name: string };
+  mode: TradingMode;
+  symbol: string;
+  unifiedSymbol: string;
+  side: TradeSide;
+  amount: number;
+  notional: number;
+  leverage: number;
+  entryPrice: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  stopLossPercent: number;
+  takeProfitPercent: number;
+  deadline: number;
+  status: TradeStatus;
+  openedAt: number;
+  closedAt: number | null;
+  exitPrice: number | null;
+  exitReason: string | null;
+  error: string | null;
+  note: string;
+  orders: TradeOrder[];
+};
+
+export type TradingBalance = {
+  asset: "USDT";
+  available: number | null;
+  total: number | null;
+  unrealizedPnl: number | null;
+  time: number;
+} | { error: string };
+
+export type TradingStatus = {
+  mode: TradingMode;
+  enabled: boolean;
+  problem: string | null;
+  limits: { maxNotional: number; maxOpenTrades: number; maxLeverage: number };
+  balance: TradingBalance | null;
+  trades: Trade[];
+};
+
+export type TestOrderRequest = {
+  symbol: string;
+  direction: "long" | "short" | "auto";
+  notional: number;
+  leverage: number;
+  stopLossPercent: number;
+  takeProfitPercent: number;
+  holdMinutes: number;
+};
+
+export const tradingModeLabels: Record<TradingMode, string> = { off: "未开启", demo: "模拟盘", live: "实盘" };
+
+export function isTradeActive(trade: Pick<Trade, "status">) {
+  return trade.status === "opening" || trade.status === "open" || trade.status === "closing";
+}
+
+/** Realized PnL in USDT before fees, when both prices are known. */
+export function tradePnl(trade: Pick<Trade, "side" | "amount" | "entryPrice" | "exitPrice">) {
+  if (trade.entryPrice === null || trade.exitPrice === null) return null;
+  const sign = trade.side === "long" ? 1 : -1;
+  return (trade.exitPrice - trade.entryPrice) * trade.amount * sign;
+}

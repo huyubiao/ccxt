@@ -2,6 +2,7 @@ import {
   AUTO_ORDER_SYMBOL_LIMIT, AUTO_ORDER_WATCH_MS, autoOrderRequestKey, autoOrderWatchKey, isAutoOrderActive,
   type AutoOrderRequest, type AutoOrderWatch, type AutoOrderWatchIdentity,
 } from "@/lib/auto-order";
+import type { ReactNode } from "react";
 import { formatMarketPriceRange, fullMarketNumber, marketNumberFormatter } from "@/lib/market-number";
 import { useRecordSelection } from "./use-record-selection";
 import styles from "./markets.module.css";
@@ -12,10 +13,12 @@ const statusLabels: Record<AutoOrderWatch["status"], string> = {
   starting: "等待行情", watching: "监控中", finished: "无活动，监控结束", stopped: "已停止", failed: "启动或监控失败",
 };
 
-export default function AutoOrders({ records, canDelete, onDelete }: {
+export default function AutoOrders({ records, canDelete, onDelete, children }: {
   records: readonly AutoOrderWatch[];
   canDelete: boolean;
   onDelete: (records: readonly AutoOrderWatchIdentity[]) => Promise<void>;
+  /** Order records from the execution engine, shown above the signal watches. */
+  children?: ReactNode;
 }) {
   const active = records.filter(isAutoOrderActive).length;
   const { selected, count, deleting, error, deletedCount, allSelected, partlySelected, select, selectAll, deleteSelected } =
@@ -30,6 +33,7 @@ export default function AutoOrders({ records, canDelete, onDelete }: {
         <small>{active ? `${active} 条记录监控中` : "暂无监控中的记录"}</small>
       </summary>
       <div className={`${styles.monitorBody} ${styles.turnover}`}>
+        {children}
         <p>空仓且连续 {AUTO_ORDER_WATCH_MS / 60_000} 分钟没有有效信号时结束。</p>
         {records.length > 0 && <div className={styles.alertActions}>
           <span>已选 {count} 条</span>
