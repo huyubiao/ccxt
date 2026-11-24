@@ -506,6 +506,184 @@ Failed or rate-limited deliveries retry at most twice. The worker retains 30 day
 of history on disk. With Node.js 24, `node --run monitor` from
 `docs/playground` also starts the worker in the foreground for diagnostics.
 
+### 下单执行与测试策略
+
+策略不直接调用交易所。策略只产出一个 `OrderIntent`（下单意图：合约、方向、
+USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
+`market-service/src/trading.rs` 里的统一执行层处理：
+
+1. 检查风控上限，设置杠杆，市价开仓。
+2. 立刻在币安挂好止损和止盈条件单（按标记价格触发）。这样即使本服务停止，
+   仓位也有保护。如果止损或止盈单被拒绝，会立刻市价平仓，绝不留下无保护的仓位。
+3. 每 5 秒检查一次进行中的交易：
+   - 交易所里的仓位没了，说明止损或止盈触发了，系统会撤掉另一张条件单；
+   - 超过最长持仓时间的交易，会市价平仓。
+
+所有策略的交易都显示在 **自动下单任务 → 下单记录** 中，每笔进行中的交易都有
+**市价平仓** 按钮。
+
+账户在启动时由 `PLAYGROUND_TRADING_MODE` 决定，页面只显示、不能切换：
+
+| 取值 | 含义 | 需要的环境变量 |
+| --- | --- | --- |
+| `off`（默认） | 不下单 | 无 |
+| `demo` | 币安模拟盘 Demo Trading（`demo-fapi.binance.com`） | `BINANCE_DEMO_API_KEY`、`BINANCE_DEMO_API_SECRET`（在 demo.binance.com 创建） |
+| `live` | 币安实盘 | `BINANCE_API_KEY`、`BINANCE_API_SECRET`，以及 `PLAYGROUND_LIVE_TRADING_CONFIRM=YES_I_UNDERSTAND_REAL_MONEY` |
+
+默认风控上限：单笔金额模拟盘 200 USDT、实盘 20 USDT，同时最多 3 笔交易，
+杠杆不超过 5 倍，可在 `.env.example` 中查看并修改。止损幅度必须小于约
+`80% × 1 / 杠杆`，确保止损在强平之前触发。其他限制：
+
+- 账户必须是单向持仓模式；
+- 同一个合约同一时间只允许一笔交易；
+- 交易所中已有持仓的合约不会下单，避免干扰手动开的仓位；
+- 只能在本地模式（`start-rust-markets.mjs` 启动）下单，和后台监控使用同一个服务器令牌保护。
+
+**交易策略 → 测试策略** 用来验证整条下单链路：选择合约、方向（做多、做空，
+或「自动」：跟随上一根已收盘的 1 分钟K线方向）、金额、杠杆、止损、止盈和持仓分钟数。
+
+新增策略时参照 `market-service/src/test_strategy.rs`：读取行情或调研指标 →
+返回一个 `OrderIntent` → 调用 `Trader::submit`。
+
+#### 本次改动的文件
+
+整体链路：页面 → Next.js 转发（带服务器令牌）→ Rust 服务 → 统一执行层 → 币安。
+
+**Rust 后端（`market-service/src/`）**
+
+| 文件 | 改动 | 作用 |
+| --- | --- | --- |
+| `trading.rs` | 新增 | 统一执行与风控。读取账户模式和风控上限；`OrderIntent` 下单意图；`Trader::submit` 负责风控检查 → 设杠杆 → 市价开仓 → 挂止损/止盈条件单；`Trader::check` 每 5 秒检查触发和到期；`Trader::close` 手动平仓。使用单独的交易客户端，不和行情请求抢同一把锁 |
+| `test_strategy.rs` | 新增 | 测试策略：把页面参数转成 `OrderIntent`；方向选「自动」时读取最近一根已收盘的 1 分钟K线 |
+| `store.sql` | 修改 | 新增 `trade` 表，保存每笔交易及其全部订单（JSON） |
+| `store.rs` | 修改 | 新增 `save_trade`、`active_trades`、`trade`、`recent_trades` |
+| `routes.rs` | 修改 | 新增 `GET /api/trading`、`POST /api/trading/test-order`、`POST /api/trading/close`，都需要服务器令牌 |
+| `main.rs` | 修改 | 启动时创建 `Trader`，打印下单模式，后台运行检查循环 |
+
+**前端（Next.js）**
+
+| 文件 | 改动 | 作用 |
+| --- | --- | --- |
+| `app/api/trading/route.ts`、`test-order/route.ts`、`close/route.ts` | 新增 | 转发到 Rust 服务；只接受本地模式、同源、JSON 请求 |
+| `lib/trading-request.ts` | 新增 | 下单和平仓请求的公共检查与转发 |
+| `lib/trading-types.ts` | 新增 | 交易、订单、账户状态的类型定义，以及盈亏估算 |
+| `lib/market-service-proxy.ts` | 修改 | 下单相关路由加入需要令牌的白名单 |
+| `app/markets/use-trading.ts` | 新增 | 每 4 秒读取下单状态；提供下单、平仓方法 |
+| `app/markets/test-strategy.tsx` | 新增 | 「测试策略」面板：账户模式标签、余额、风控上限、下单表单和二次确认 |
+| `app/markets/trade-records.tsx` | 新增 | 「下单记录」表格：状态、止损止盈、订单明细、盈亏、市价平仓按钮 |
+| `app/markets/auto-orders.tsx` | 修改 | 自动下单任务里嵌入下单记录 |
+| `app/markets/market-monitor.tsx` | 修改 | 交易策略区域挂上测试策略面板和下单记录 |
+| `app/markets/markets.module.css` | 修改 | 模拟盘/实盘标签、下拉框、平仓按钮样式 |
+
+**配置与文档**：`.env.example` 增加下单相关环境变量说明；本 README 增加本节。
+
+#### 运行环境
+
+- Node.js 24（项目使用 `URL.parse` 等新接口，Node 20 下下单请求会失败）。用 nvm 时先执行 `nvm use 24`。
+- Rust stable。macOS 用 Homebrew 安装 rustup 后，需要把 `/opt/homebrew/opt/rustup/bin` 加入 `PATH`。
+- 首次启动会自动编译 Rust 服务，之后启动只需几秒。
+
+#### 配置模拟盘
+
+1. 登录 [demo.binance.com](https://demo.binance.com)，在 API 管理中创建模拟盘 API Key。模拟盘 Key 和实盘 Key 是分开的。
+2. 在模拟盘合约交易页面的设置里，把「持仓模式」设为 **单向持仓**。
+3. 在 `docs/playground/.env` 或 `.env.local` 中写入（两个文件都已被 git 忽略，不会提交）：
+
+   ```
+   PLAYGROUND_TRADING_MODE=demo
+   BINANCE_DEMO_API_KEY=你的模拟盘 Key
+   BINANCE_DEMO_API_SECRET=你的模拟盘 Secret
+   ```
+
+4. 启动：
+
+   ```bash
+   cd docs/playground
+   nvm use 24
+   export PATH=/opt/homebrew/opt/rustup/bin:$PATH
+   node scripts/start-rust-markets.mjs
+   ```
+
+   终端出现 `下单模式：Demo，单笔上限 200 USDT` 表示配置生效；如果出现 `下单未开启：……`，按提示补全环境变量。
+
+#### 测试方法
+
+**第 1 步：离线测试（不需要 API Key）**
+
+在仓库根目录执行：
+
+```bash
+(cd docs/playground/market-service && cargo test --locked)   # Rust 单元测试
+(cd docs/playground && npx tsc --noEmit -p .)                 # 前端类型检查
+```
+
+`trading.rs` 中的测试覆盖：未配置模式或 Key 时不下单；实盘必须设置确认变量，且不能使用模拟盘 Key；
+模拟盘客户端的请求地址指向 `demo-fapi.binance.com`；止损幅度超过强平距离、金额超过上限时拒绝下单；
+交易记录能正确写入和读出数据库。
+
+**第 2 步：检查连接（只读，不下单）**
+
+浏览器打开 <http://127.0.0.1:3000/markets>，展开 **交易策略 → 测试策略**：
+
+- 顶部显示橙色「模拟盘」标签和「可用 xxx USDT」，说明 Key 有效、连接的是模拟盘；
+- 显示「余额读取失败：API-key format invalid（-2014）」等错误，说明 Key 填错或不是模拟盘 Key。
+
+也可以用命令行查看同一份状态：
+
+```bash
+curl -s -H "Host: 127.0.0.1:3000" http://127.0.0.1:3000/api/trading
+```
+
+**第 3 步：模拟盘端到端测试**
+
+保持默认参数（DOGEUSDT、方向自动、20 USDT、2 倍、止损 1%、止盈 1%、持仓 5 分钟），点击
+**运行测试策略** 并在弹窗中确认，然后在 **自动下单任务 → 下单记录** 中逐项核对：
+
+| 测试项 | 操作 | 页面上应看到 | 币安模拟盘上应看到 |
+| --- | --- | --- | --- |
+| 开仓 + 挂保护单 | 运行测试策略 | 状态「持仓中」；订单：开仓·已成交、止损·已挂单、止盈·已挂单 | 「仓位」中有该合约；「条件单」中有两张止盈止损单 |
+| 手动平仓 | 点击「市价平仓」 | 状态「已平仓 · 手动平仓」；止损、止盈·已撤销；平仓·已成交 | 仓位和条件单都消失 |
+| 止损或止盈触发 | 把止损、止盈都改为 `0.2%` 再运行，等待价格波动 | 「已平仓 · 止损触发」或「止盈触发」，另一张条件单「已撤销」 | 仓位消失，条件单清空 |
+| 持仓到期 | 持仓时间填 `1` 分钟，止损止盈填大一些（如 5%） | 约 1 分钟后「已平仓 · 持仓到期，市价平仓」 | 仓位和条件单都消失 |
+
+触发检查每 5 秒运行一次，页面每 4 秒刷新一次，状态变化最多延迟约 10 秒。
+
+**第 4 步：异常场景（都应拒绝下单，并显示中文原因）**
+
+| 场景 | 预期提示 |
+| --- | --- |
+| 金额超过单笔上限（如 5000） | 下单金额超过单笔上限 |
+| 交易对不存在（如 `NOPEUSDT`） | 不是可交易的币安 USDT 永续合约 |
+| 5 倍杠杆、止损填 20% | 止损幅度必须小于 16.00%，否则可能先被强平 |
+| 同一合约已有进行中的交易，再下一单 | 同一合约同一时间只允许一个策略持仓 |
+| 在币安上手动开了仓的合约 | 在交易所已有持仓，本次不下单 |
+| 账户为双向持仓模式 | 请在币安合约设置中切换为单向持仓 |
+| 金额太小（低于交易所最小下单额） | 低于最小下单数量 / 最小下单金额 |
+
+**第 5 步：服务重启恢复**
+
+在持仓中时按 `Ctrl+C` 停止服务，再重新启动：止损止盈单仍挂在交易所，仓位不受影响；
+重启后检查循环会接着管理这笔交易（检测触发、到期平仓）。
+
+#### 常见错误
+
+| 错误 | 原因与处理 |
+| --- | --- |
+| `API-key format invalid（-2014）` | Key 格式不对或填错，检查是否多复制了空格 |
+| `Invalid API-key, IP, or permissions（-2015）` | Key 没有合约权限、IP 不在白名单，或把实盘 Key 用在了模拟盘（反之亦然） |
+| `Margin is insufficient（-2019）` | 保证金不足，降低金额或提高杠杆 |
+| `Rust 行情服务暂时不可用` | Rust 服务没启动或已退出，查看启动终端的报错 |
+| 页面显示「仅本地模式可用」 | 没有用 `start-rust-markets.mjs` 启动，或不是通过 `127.0.0.1` / `localhost` 访问 |
+
+#### 切换到实盘前
+
+1. 先在模拟盘完成上面第 3、4 步的全部测试。
+2. 实盘 API Key 只开「合约交易」权限，**不要开提现**，并绑定 IP 白名单。
+3. 环境变量改为 `PLAYGROUND_TRADING_MODE=live`，填写 `BINANCE_API_KEY`、`BINANCE_API_SECRET`，
+   并设置 `PLAYGROUND_LIVE_TRADING_CONFIRM=YES_I_UNDERSTAND_REAL_MONEY`。
+4. 实盘单笔上限默认 20 USDT，建议先用最小金额测试。仓库规定实盘测试每笔不得超过 25 美元。
+5. 页面显示红色「实盘」标签，下单确认弹窗会额外提示「实盘，真实资金」。
+
 ### Automatic order monitoring
 
 **交易策略 → 自动下单任务** lists tasks across strategies with their

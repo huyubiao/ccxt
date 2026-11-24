@@ -8,7 +8,9 @@ mod research;
 mod routes;
 mod store;
 mod strategy;
+mod test_strategy;
 mod tokenomics;
+mod trading;
 mod volume;
 
 use std::io::Write;
@@ -46,8 +48,24 @@ async fn main() -> store::Result<()> {
         .then(store::Store::open_default)
         .transpose()?
         .map(Arc::new);
-    let app = routes::router(binance.clone(), store.clone(), notifier.clone(), token)?;
+    // Order execution needs the local database and the token-protected routes.
+    let trader = store.as_ref().map(|store| {
+        Arc::new(trading::Trader::new(
+            trading::Settings::from_env(),
+            Arc::clone(store),
+            Arc::clone(&binance),
+        ))
+    });
+    if let Some(trader) = &trader {
+        let settings = trader.settings();
+        match &settings.problem {
+            Some(problem) => eprintln!("下单未开启：{problem}"),
+            None => eprintln!("下单模式：{:?}，单笔上限 {} USDT", settings.mode, settings.max_notional),
+        }
+    }
+    let app = routes::router(binance.clone(), store.clone(), notifier.clone(), trader.clone(), token)?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let trading = trader.map(|trader| tokio::spawn(trading::supervise(trader, stopped.clone())));
     let worker = store.as_ref().map(|store| {
         tokio::spawn(monitor::supervise(
             Arc::clone(store),
@@ -68,6 +86,9 @@ async fn main() -> store::Result<()> {
     let _ = stop.send(true);
     if let Some(worker) = worker {
         worker.await?;
+    }
+    if let Some(trading) = trading {
+        trading.await?;
     }
     served?;
     Ok(())

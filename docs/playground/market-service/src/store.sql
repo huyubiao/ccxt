@@ -21,3 +21,8 @@ CREATE TABLE IF NOT EXISTS auto_order_request (
     time INTEGER NOT NULL, PRIMARY KEY (strategyId, symbol, id)
 );
 CREATE INDEX IF NOT EXISTS auto_order_request_time ON auto_order_request (strategyId, time DESC);
+CREATE TABLE IF NOT EXISTS trade (
+    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, status TEXT NOT NULL, openedAt INTEGER NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trade_status ON trade (status);
+CREATE INDEX IF NOT EXISTS trade_time ON trade (openedAt);

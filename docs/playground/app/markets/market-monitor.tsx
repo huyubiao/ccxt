@@ -23,6 +23,9 @@ import AlertRecords from "./alert-records";
 import AutoOrders, { StrategyOrderRequests } from "./auto-orders";
 import { useStrategyNotifications } from "./use-strategy-notifications";
 import DingTalkSettings from "./dingtalk-settings";
+import TestStrategy from "./test-strategy";
+import TradeRecords from "./trade-records";
+import { useTrading } from "./use-trading";
 import styles from "./markets.module.css";
 
 const STREAM = "wss://fstream.binance.com/market/ws/!miniTicker@arr";
@@ -100,6 +103,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   }));
   const [recordsReady, setRecordsReady] = useState(false);
   const background = useBackgroundMonitor();
+  const trading = useTrading();
   const server = background.mode === "local";
   const canEdit = background.mode !== "loading" && !background.saving && !background.deleting;
   const serverRule = background.data?.configured ? background.data.rule : null;
@@ -628,8 +632,11 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
       <DingTalkSettings {...strategyNotifications} />
       {strategy}
+      <TestStrategy mode={trading.mode} status={trading.data} error={trading.error} onSubmit={trading.placeTestOrder} />
       <AutoOrders records={server ? background.data?.autoOrders ?? [] : browserOrders}
-        canDelete={canEdit} onDelete={deleteAutoOrderRecords} />
+        canDelete={canEdit} onDelete={deleteAutoOrderRecords}>
+        {trading.mode === "local" && <TradeRecords trades={trading.data?.trades ?? []} onClose={trading.closeTrade} />}
+      </AutoOrders>
     </section>
   );
 }
