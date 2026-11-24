@@ -136,6 +136,7 @@ pub struct Markets {
 impl Markets {
     pub fn new(binance: Arc<Binance>) -> Result<Self, reqwest::Error> {
         let client = Client::builder()
+            .user_agent(crate::HTTP_USER_AGENT)
             .timeout(Duration::from_secs(8))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -292,11 +293,7 @@ impl Markets {
                 let mut pairs = Vec::with_capacity(directory.contracts.len());
                 for contract in directory.contracts {
                     let base = contract.base.to_uppercase();
-                    let coin = if contract.kind == "PERPETUAL" {
-                        self.binance_coin(&contract.id, &base).await
-                    } else {
-                        base
-                    };
+                    let coin = self.binance_coin(&contract.id, &base).await;
                     pairs.push(Instrument::new(
                         &contract.id,
                         &contract.base,
@@ -616,7 +613,7 @@ fn alpha_pair(id: &str, base: &str, token: Option<&Value>) -> Instrument {
 }
 
 fn okx_pair(row: &Value, kind: Kind) -> Option<Instrument> {
-    if row["state"] != "live" {
+    if row["state"] != "live" || row["instCategory"] != "1" {
         return None;
     }
     let id = row["instId"].as_str()?;
@@ -740,4 +737,32 @@ fn funding_point(rate: &Value, time: &Value) -> Option<FundingPoint> {
         time,
         rate: number(rate)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn okx_spot_and_swaps_require_crypto_underlyings() {
+        for (base, category, expected) in [
+            ("BTC", "1", true),
+            ("HANMI", "3", false),
+            ("SPY", "3", false),
+            ("XAU", "4", false),
+            ("UNKNOWN", "", false),
+        ] {
+            let spot = json!({
+                "state": "live", "instCategory": category, "instId": format!("{base}-USDT"),
+                "baseCcy": base, "quoteCcy": "USDT",
+            });
+            let swap = json!({
+                "state": "live", "instCategory": category, "instId": format!("{base}-USDT-SWAP"),
+                "uly": format!("{base}-USDT"), "settleCcy": "USDT", "ctType": "linear",
+                "ctValCcy": base, "ctVal": "0.01",
+            });
+            assert_eq!(okx_pair(&spot, Kind::Spot).is_some(), expected, "{base}");
+            assert_eq!(okx_pair(&swap, Kind::Futures).is_some(), expected, "{base}");
+        }
+    }
 }

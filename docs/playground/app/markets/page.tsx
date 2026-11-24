@@ -119,7 +119,7 @@ export default function MarketsPage() {
         <section id="coin-research" className={styles.workspace} aria-labelledby="coin-research-heading">
           <div className={styles.researchHeading}>
             <h2 id="coin-research-heading" className={styles.sectionTitle}>币种深度调研</h2>
-            <p>选择有币安 USDT 本位永续合约的币种，查看市值、代币解锁、最新成交价和成交额。各平台仅显示 USDT 报价交易对。</p>
+            <p>选择有币安 USDT 本位永续合约的加密币种，查看市值、代币解锁、最新成交价和成交额。各平台仅显示 USDT 报价交易对。</p>
           </div>
           <section className={styles.directory} aria-label="可交易币种">
             <div className={styles.directoryHeader}>

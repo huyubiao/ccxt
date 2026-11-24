@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use crate::research::{coin_symbol, positive, Research};
 
 const DAY: i64 = 86_400_000;
 const RETRY: i64 = 6 * 3_600_000;
+const CACHE_VERSION: i64 = 4;
 const CMC: &str = "https://api.coinmarketcap.com/data-api/v3";
 
 pub struct Unlocks {
@@ -64,7 +66,7 @@ impl Unlocks {
             .unwrap_or_default();
         let attempted = saved["attemptedAt"].as_i64().unwrap_or_default();
         let version = saved["version"].as_i64();
-        let clean = matches!(version, Some(1 | 2))
+        let clean = matches!(version, Some(1..=CACHE_VERSION))
             && saved["attemptedAt"].is_number()
             && (saved["row"].is_null()
                 || saved["row"]["symbol"].is_string()
@@ -89,9 +91,15 @@ impl Unlocks {
             seed
         };
         let tokenomics = self.tokenomics(contract, start, prior, stored);
-        if complete(&tokenomics)
+        let history_checked = if saved["row"].is_object() {
+            saved["version"] == CACHE_VERSION
+        } else {
+            seed["recentUnlocks"].is_array()
+        };
+        if history_checked
+            && complete(&tokenomics)
             && start - tokenomics["updatedAt"].as_i64().unwrap_or_default() < DAY
-            || saved["version"] == 2 && start - attempted < RETRY
+            || saved["version"] == CACHE_VERSION && start - attempted < RETRY
         {
             return (tokenomics, text(&prior["geckoId"]));
         }
@@ -106,7 +114,7 @@ impl Unlocks {
             None
         };
         let row = fresh.or_else(|| saved.get("row").cloned().filter(Value::is_object));
-        let mut snapshot = json!({"version":2,"attemptedAt":start});
+        let mut snapshot = json!({"version":CACHE_VERSION,"attemptedAt":start});
         if let Some(row) = row.as_ref() {
             snapshot["row"] = row.clone();
         }
@@ -145,20 +153,21 @@ impl Unlocks {
                         .is_some_and(|time| time >= now))
         });
         events.sort_by_key(event_time);
+        let with_percentage = |mut event: Value| {
+            if event["timeKind"].is_null() {
+                event["timeKind"] = json!("scheduled");
+            }
+            event["supplyPercentage"] = json!(event["amount"]
+                .as_f64()
+                .zip(denominator.filter(|supply| *supply > 0.0))
+                .map(|(amount, supply)| amount / supply * 100.0));
+            event
+        };
         let upcoming: Vec<_> = events
             .iter()
             .take(3)
             .cloned()
-            .map(|mut event| {
-                if event["timeKind"].is_null() {
-                    event["timeKind"] = json!("scheduled");
-                }
-                event["supplyPercentage"] = json!(event["amount"]
-                    .as_f64()
-                    .zip(denominator.filter(|supply| *supply > 0.0))
-                    .map(|(amount, supply)| amount / supply * 100.0));
-                event
-            })
+            .map(with_percentage)
             .collect();
         let next_cliff = if upcoming.iter().any(|event| event["mechanism"] == "cliff") {
             None
@@ -171,6 +180,17 @@ impl Unlocks {
         } else {
             None
         };
+        let recent = if rule.is_object() || staking.is_object() {
+            Vec::new()
+        } else {
+            recent_unlocks(
+                stored_events(row).chain(stored_events(&stored["contracts"][contract])),
+                now,
+            )
+            .into_iter()
+            .map(with_percentage)
+            .collect::<Vec<_>>()
+        };
         let kind = if rule.is_object() {
             "mining"
         } else if staking.is_object() {
@@ -180,6 +200,7 @@ impl Unlocks {
             .is_some_and(|events| !events.is_empty())
             || row["time"].is_number()
             || !row["lockedAmount"].is_null()
+            || !recent.is_empty()
         {
             "vesting"
         } else {
@@ -194,7 +215,7 @@ impl Unlocks {
         };
         let mut result = json!({"symbol":value("symbol").as_str().unwrap_or_else(||contract.strip_suffix("USDT").unwrap_or(contract)),
             "kind":kind,"lockedAmount":locked,"maxSupply":value("maxSupply"),"supplyLimit":match kind{"mining"=>"capped","staking"=>"unlimited",_=>row["supplyLimit"].as_str().unwrap_or("unknown")},
-            "percentageSupply":denominator,"percentageBasis":row["percentageBasis"],"events":upcoming,"mining":mining,
+            "percentageSupply":denominator,"percentageBasis":row["percentageBasis"],"events":upcoming,"recentUnlocks":recent,"mining":mining,
             "staking":staking.is_object().then(||json!({"mechanism":"proof-of-stake","recipients":staking["recipients"],"hasFixedHalving":false,
                 "hasFeeBurn":staking["hasFeeBurn"],"dailyIssuance":null,"dailyBurn":null,"dailyNetIssuance":null})),
             "sourceName":value("sourceName").as_str().unwrap_or_default(),"sourceUrl":value("sourceUrl").as_str().unwrap_or_default(),
@@ -260,18 +281,23 @@ impl Unlocks {
             .and_then(|row| row["events"].as_array())
             .cloned()
             .unwrap_or_default();
-        let events = merge(
-            llama
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .chain(reviewed_events)
-                .chain(tokenomist.clone().unwrap_or_default())
-                .chain(cmc_events.clone())
-                .collect(),
+        let candidates: Vec<_> = llama
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .chain(reviewed_events)
+            .chain(tokenomist.clone().unwrap_or_default())
+            .chain(cmc_events.clone())
+            .collect();
+        let recent = recent_unlocks(
+            candidates.iter()
+                .chain(cmc.iter().flat_map(stored_events))
+                .chain(stored_events(prior)),
             now,
         );
-        if cmc.is_none() && events.is_empty() {
+        let has_history = candidates.iter().any(|event| completed(event, now));
+        let events = merge(candidates, now);
+        if cmc.is_none() && events.is_empty() && !has_history {
             return None;
         }
         let fresh_groups: HashSet<_> = events
@@ -340,7 +366,7 @@ impl Unlocks {
             json!({"symbol":symbol,"geckoId":id,"cmcSlug":metadata["cmcSlug"],"lockedAmount":cmc.as_ref().and_then(|row|row["lockedAmount"].as_f64()).or_else(||prior["lockedAmount"].as_f64()),
             "maxSupply":supply["maxSupply"],"supplyLimit":if cap.is_some(){"capped"}else{supply["supplyLimit"].as_str().unwrap_or("unknown")},
             "percentageSupply":cap.or_else(||supply["percentageSupply"].as_f64()),"percentageBasis":if cap.is_some(){json!("maxSupply")}else{supply["percentageBasis"].clone()},
-            "events":releases,"sourceName":supply["sourceName"],"sourceUrl":supply["sourceUrl"],
+            "events":releases,"recentUnlocks":recent,"sourceName":supply["sourceName"],"sourceUrl":supply["sourceUrl"],
             "updatedAt":if !releases.is_empty()&&!had_events{prior["updatedAt"].as_i64().unwrap_or(now)}else{now}}),
         )
     }
@@ -383,16 +409,25 @@ impl Unlocks {
             .filter(|amount| *amount >= 0.0);
         let source = format!("https://coinmarketcap.com/currencies/{slug}/#token-unlocks");
         let mut events = parse_scheduled(info, &advertised.to_uppercase(), &source, now);
-        if !events.is_empty() || locked.is_some_and(|locked| locked > 0.0) {
+        let has_future = !events.is_empty() || locked.is_some_and(|locked| locked > 0.0);
+        let mut history = Vec::new();
+        if has_future || locked.is_some() {
             if let Some(id) = row["id"].as_u64() {
                 let id = id.to_string();
                 let (month, year) = tokio::join!(
-                    self.curve(&id, "1M", advertised, &source, now),
-                    self.curve(&id, "1Y", advertised, &source, now)
+                    self.curve(&id, "1M", advertised, &source),
+                    self.curve(&id, "1Y", advertised, &source)
                 );
                 let mut estimates: Vec<_> = month.into_iter().chain(year).collect();
                 estimates.sort_by_key(event_time);
                 for event in estimates {
+                    if event_time(&event) <= now {
+                        history.push(event);
+                        continue;
+                    }
+                    if !has_future {
+                        break;
+                    }
                     let cutoff = events.last().map(event_time).unwrap_or(now);
                     if event["periodStart"].as_i64().unwrap_or_default() < cutoff {
                         continue;
@@ -407,7 +442,7 @@ impl Unlocks {
         Some(
             json!({"symbol":advertised,"geckoId":id,"cmcSlug":slug,"updatedAt":now,"lockedAmount":locked,"maxSupply":max,
             "supplyLimit":supply,"percentageSupply":max.or(total),"percentageBasis":max.map(|_|"maxSupply").or(total.map(|_|"totalSupply")),
-            "events":events,"sourceUrl":source,"sourceName":"CoinMarketCap"}),
+            "events":events,"recentUnlocks":history,"sourceUrl":source,"sourceName":"CoinMarketCap"}),
         )
     }
 
@@ -417,7 +452,6 @@ impl Unlocks {
         range: &str,
         symbol: &str,
         source: &str,
-        now: i64,
     ) -> Vec<Value> {
         let result = self
             .markets
@@ -454,7 +488,7 @@ impl Unlocks {
         let points: Vec<_> = points.into_iter().collect();
         points.windows(2).filter_map(|pair|{
             let [(start,previous),(time,current)]=pair else{return None;};
-            if *start<now||current.len()!=previous.len(){return None;}
+            if current.len()!=previous.len(){return None;}
             let mut allocations=Vec::new();let mut total=0.0;
             for (name,(amount,version)) in current{
                 let (old,prior_version)=previous.get(name)?;
@@ -646,28 +680,72 @@ fn parse_scheduled(row: &Value, symbol: &str, source: &str, now: i64) -> Vec<Val
     vec![event(amount, kind, allocations)]
 }
 
+fn stored_events(row: &Value) -> impl Iterator<Item = &Value> {
+    row["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain((row["events"].is_null() && row["time"].is_number()).then_some(row))
+        .chain(row["recentUnlocks"].as_array().into_iter().flatten())
+}
+
+fn completed(event: &Value, now: i64) -> bool {
+    let time = event_time(event);
+    time > 0
+        && time <= now
+        && positive(&event["amount"]).is_some()
+        && (event["timeKind"] != "interval-estimate"
+            || event["periodStart"]
+                .as_i64()
+                .is_some_and(|start| start < time))
+}
+
+fn recent_unlocks<'a>(events: impl Iterator<Item = &'a Value>, now: i64) -> Vec<Value> {
+    let candidates = events.filter(|event| completed(event, now)).cloned();
+    let mut recent = merge_releases(candidates, true);
+    recent.sort_by_key(|event| Reverse(event_time(event)));
+    recent.truncate(2);
+    recent
+}
+
 fn merge(events: Vec<Value>, now: i64) -> Vec<Value> {
+    let upcoming = events.into_iter().filter(|event| {
+        event_time(event) > now
+            && (event["timeKind"] != "interval-estimate"
+                || event["periodStart"]
+                    .as_i64()
+                    .is_some_and(|start| start >= now))
+    });
+    merge_releases(upcoming, false)
+}
+
+fn merge_releases(events: impl Iterator<Item = Value>, historical: bool) -> Vec<Value> {
     let mut groups = HashMap::<(i64, String), Vec<Value>>::new();
     let mut estimates = Vec::new();
     for event in events {
-        if event_time(&event) <= now || positive(&event["amount"]).is_none() {
+        let Some(amount) = positive(&event["amount"]) else {
             continue;
-        }
+        };
         if event["timeKind"] == "interval-estimate" {
-            if event["periodStart"]
-                .as_i64()
-                .is_some_and(|time| time >= now)
-            {
-                estimates.push(event);
-            }
+            estimates.push(event);
             continue;
         }
         let group = groups.entry(group(&event)).or_default();
-        if !group.iter().any(|prior| {
-            ["sourceName", "time", "amount", "allocations"]
+        let duplicate = group.iter_mut().find(|prior| {
+            ["sourceName", "time"]
                 .iter()
                 .all(|field| prior[*field] == event[*field])
-        }) {
+                && if historical {
+                    positive(&prior["amount"]) == Some(amount)
+                } else {
+                    prior["amount"] == event["amount"] && prior["allocations"] == event["allocations"]
+                }
+        });
+        if let Some(prior) = duplicate {
+            if historical && prior["allocationComplete"] != true && event["allocationComplete"] == true {
+                *prior = event;
+            }
+        } else {
             group.push(event);
         }
     }
@@ -712,13 +790,26 @@ fn merge(events: Vec<Value>, now: i64) -> Vec<Value> {
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            checks.extend(group.iter().enumerate().filter(|(index,_)|*index!=winner).map(|(_,other)|json!({
-                "sourceName":other["sourceName"],"sourceUrl":other["sourceUrl"],"amount":other["amount"],"agrees":agrees(&event,other)})));
+            for (index, other) in group.iter().enumerate() {
+                if index != winner {
+                    if historical {
+                        checks.retain(|check| check["sourceName"] != other["sourceName"]);
+                    }
+                    checks.push(json!({"sourceName":other["sourceName"],"sourceUrl":other["sourceUrl"],
+                        "amount":other["amount"],"agrees":agrees(&event,other)}));
+                }
+            }
             event["sourceChecks"] = json!(checks);
         }
         results.push(event);
     }
-    estimates.sort_by_key(event_time);
+    if historical {
+        estimates.sort_by_key(|event| {
+            (Reverse(event_time(event)), Reverse(event["periodStart"].as_i64()))
+        });
+    } else {
+        estimates.sort_by_key(event_time);
+    }
     for estimate in estimates {
         let start = estimate["periodStart"].as_i64().unwrap_or_default();
         if !results.iter().any(|event| {
@@ -916,6 +1007,43 @@ fn mining(rule: &Value, anchor: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binance::Binance;
+
+    #[test]
+    fn exposes_two_completed_releases_with_allocations_and_keeps_future_releases() {
+        let now = 10 * DAY;
+        let release = |time| {
+            cliff(
+                "Source",
+                "url",
+                "TOKEN",
+                time,
+                25.0,
+                vec![allocation("Investors", 25.0).unwrap()],
+            )
+            .unwrap()
+        };
+        let mut overlapping = release(now + DAY);
+        overlapping["timeKind"] = json!("interval-estimate");
+        overlapping["periodStart"] = json!(now - DAY);
+        let mut archived = release(now);
+        archived["amount"] = json!(25);
+        let row = json!({"symbol":"TOKEN","percentageSupply":100.0,
+            "events":[release(now - 3 * DAY), release(now + 2 * DAY), release(now), overlapping],
+            "recentUnlocks":[archived]});
+        let stored = json!({"contracts":{"TOKENUSDT":release(now - DAY)}});
+        let unlocks = Unlocks::new(Arc::new(Markets::new(Arc::new(Binance::new())).unwrap())).unwrap();
+        let result = unlocks.tokenomics("TOKENUSDT", now, &row, &stored);
+        let past = result["recentUnlocks"].as_array().unwrap();
+        assert_eq!(
+            past.iter().map(event_time).collect::<Vec<_>>(),
+            [now, now - DAY]
+        );
+        assert_eq!(past[0]["supplyPercentage"], 25.0);
+        assert_eq!(past[0]["allocations"][0]["name"], "Investors");
+        assert_eq!(result["events"].as_array().unwrap().len(), 1);
+        assert_eq!(event_time(&result["events"][0]), now + 2 * DAY);
+    }
 
     #[test]
     fn keeps_independent_release_types_and_records_source_disagreement() {

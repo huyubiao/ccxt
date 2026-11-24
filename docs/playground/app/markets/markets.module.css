@@ -48,6 +48,7 @@
 .alertTable thead { position: sticky; top: 0; background: hsl(var(--card)); }
 .alertTable input[type="checkbox"] { margin: 0; accent-color: hsl(var(--brand)); vertical-align: middle; }
 .alertSelectAll { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.alertSelectAll:has(input:disabled) { cursor: default; }
 .monitorSettings { padding: 16px; }
 .monitorSettings p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .monitorForm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -171,6 +172,7 @@
 .fundamentalsGrid h4 { margin: 0 0 8px; font-size: 14px; }
 .fundamentalsNote { margin: 8px 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.5; }
 .fundamentalsLink { color: hsl(var(--brand)); font-size: 12px; }
+.unlockHistoryTitle { margin: 14px 0 8px; font-size: 13px; }
 .unlockTable { margin-top: 8px; width: 100%; border-collapse: collapse; font-size: 12px; }
 .unlockTable th, .unlockTable td { padding: 6px 4px; border-bottom: 1px solid hsl(var(--border)); }
 .unlockTable th { font-weight: 500; text-align: left; }
@@ -373,6 +375,11 @@
 .turnover td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .turnover .alertTable tr > :first-child { text-align: center; }
 .turnover .alertTable thead th:nth-child(2) { text-align: left; }
+.turnover .alertTable tr > .emptyTableCell {
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+  text-align: left;
+}
 .orderBookDepth { min-width: 0; }
 .orderBookDepth > summary { cursor: pointer; font-size: 14px; font-weight: 600; }
 .orderBookDepth caption { text-align: left; padding: 6px 0; color: hsl(var(--muted-foreground)); }

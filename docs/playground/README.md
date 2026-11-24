@@ -42,10 +42,11 @@ also starts the Rust service.
 On Windows x64 the launcher first looks for
 `docs/playground/market-service/bin/win32-x64/playground-market-service.exe`.
 The release executable embeds its Rust and C runtime dependencies. A matching
-binary also works with the `monitor` command. A source checkout can build the
-backend automatically when the executable is absent, using a current stable Rust
-toolchain and Windows C/C++ build tools. Set `PLAYGROUND_BUILD_RUST=1` before
-launching to rebuild after changing the Rust source.
+binary also works with the `monitor` command. A source checkout automatically
+builds the backend when the executable is missing or its Rust sources or bundled
+data snapshots are newer. This uses a current stable Rust toolchain and Windows
+C/C++ build tools. Set `PLAYGROUND_BUILD_RUST=1` before launching to force the
+source build.
 
 To produce a Windows x64 release from the repository root with PowerShell:
 
@@ -96,15 +97,16 @@ cp .env.example .env.local    # set PLAYGROUND_AI_URL for the AI panel
 node scripts/start-rust-markets.mjs  # http://127.0.0.1:3000
 ```
 
-The local homepage lists coins with an active USDT-margined perpetual
-contract on Binance. Select a coin and switch platforms to view its
-USDT-quoted pairs across Binance and OKX. The USDT filter also
+The local homepage lists crypto assets with an active USDT-margined perpetual
+contract on Binance. Binance and OKX market directories use exchange metadata to
+exclude stock, index, commodity, and other non-crypto markets. Select a coin and
+switch platforms to view its USDT-quoted pairs across Binance and OKX. The USDT filter also
 applies to Binance Alpha. Markets with multiple pairs offer a pair selector.
 Alpha pairs are grouped by coin symbol and include their Binance ID and,
 when available, their chain and token address to distinguish same-name tokens.
 
 The price movement monitor stores its DingTalk notification preference separately
-from price monitoring. The monitor watches the full live Binance USDT perpetual
+from price monitoring. The monitor watches the Binance USDT perpetual crypto
 directory shared with coin research. Both sections count each coin once,
 including when a coin has several contracts.
 
@@ -287,7 +289,7 @@ to 20.9%. Using the same conservative price confirmation, the previous score
 confirmed zero alerts and the fitted score confirmed 29, of which 24 fell
 in a Swolecharts event interval. This covered 24 of 891 recorded event intervals.
 
-Token details read supply limits, locked balances, and future releases from
+Token details read supply limits, locked balances, and release records from
 `lib/coin-unlock-snapshot.json`. The importer matches sources to perpetual
 contracts using CoinGecko's contract identities. It combines CoinMarketCap
 with reviewed project data, including Binance Research supply figures and
@@ -300,12 +302,16 @@ eligible for a fresh lookup immediately.
 The API's `tokenomics` field includes up to three future releases, their
 allocation breakdowns and supply percentages, and explicit coverage states.
 If those releases contain no cliff unlock, `nextCliff` exposes the next
-available cliff separately.
+available cliff separately. `recentUnlocks` lists up to two past releases
+in reverse chronological order, with the same allocation and percentage fields.
+The page shows their allocation details and valuations at the current price.
 Percentages use maximum supply where available, otherwise the snapshot's
 total supply. Events derived from cumulative vesting curves carry
 `timeKind: "interval-estimate"` and `periodStart`, so consumers can distinguish
-release intervals from dated scheduled events. The research page shows
-the import time and hides expired events. It reads the bundled snapshot and
+release intervals from dated scheduled events. Completed intervals are dated
+by their end time. Past scheduled events reflect source schedules. The page shows
+the import time and keeps recent releases from earlier snapshots.
+It reads the bundled snapshot and
 the per-contract files in `.cache/unlocks/` before requesting schedules.
 Missing coverage, expired events, and incomplete allocations trigger a lookup
 for that contract only. Complete records are also rechecked after 24 hours.

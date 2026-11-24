@@ -82,19 +82,39 @@ export function releaseGroup(event) {
 }
 
 export function mergeUnlockEvents(events, now) {
+  return mergeReleases(events.filter((event) => event.time > now &&
+    (event.timeKind !== "interval-estimate" || event.periodStart >= now)), false);
+}
+
+export function isCompletedUnlock(event, now) {
+  return Number.isFinite(event.time) && event.time > 0 && event.time <= now &&
+    Number.isFinite(event.amount) && event.amount > 0 &&
+    (event.timeKind !== "interval-estimate" ||
+      (Number.isFinite(event.periodStart) && event.periodStart < event.time));
+}
+
+export function recentUnlocks(events, now) {
+  return mergeReleases(events.filter((event) => isCompletedUnlock(event, now)), true)
+    .sort((a, b) => b.time - a.time).slice(0, 2);
+}
+
+function mergeReleases(events, historical) {
   const groups = new Map();
   const estimates = [];
   for (const event of events) {
-    if (!Number.isFinite(event.time) || event.time <= now || !Number.isFinite(event.amount) || event.amount <= 0) continue;
+    if (!Number.isFinite(event.time) || !Number.isFinite(event.amount) || event.amount <= 0) continue;
     if (event.timeKind === "interval-estimate") {
-      if (event.periodStart >= now) estimates.push(event);
+      estimates.push(event);
       continue;
     }
     const key = releaseGroup(event);
     if (!groups.has(key)) groups.set(key, []);
     const group = groups.get(key);
-    if (!group.some((saved) => saved.sourceName === event.sourceName && saved.time === event.time && saved.amount === event.amount &&
-      JSON.stringify(saved.allocations) === JSON.stringify(event.allocations))) group.push(event);
+    const duplicate = group.findIndex((saved) => saved.sourceName === event.sourceName &&
+      saved.time === event.time && saved.amount === event.amount &&
+      (historical || JSON.stringify(saved.allocations) === JSON.stringify(event.allocations)));
+    if (duplicate === -1) group.push(event);
+    else if (historical && !group[duplicate].allocationComplete && event.allocationComplete) group[duplicate] = event;
   }
   const scheduled = [...groups.values()].flatMap((group) => {
     // A provider can report separate releases of the same type on the same day.
@@ -109,10 +129,15 @@ export function mergeUnlockEvents(events, now) {
     const sourceChecks = group.filter((event) => event !== chosen).map(({ sourceName, sourceUrl, amount }) => ({
       sourceName, sourceUrl, amount, agrees: compareAmounts(chosen.amount, amount),
     }));
-    return sourceChecks.length ? [{ ...chosen, sourceChecks: [...(chosen.sourceChecks ?? []), ...sourceChecks] }] : [chosen];
+    const priorChecks = (chosen.sourceChecks ?? []).filter((check) =>
+      !historical || !sourceChecks.some((source) => check.sourceName === source.sourceName));
+    return sourceChecks.length ? [{ ...chosen, sourceChecks: [...priorChecks, ...sourceChecks] }] : [chosen];
   });
   const results = [...scheduled];
-  for (const estimate of estimates.sort((a, b) => a.time - b.time)) {
+  estimates.sort(historical
+    ? (a, b) => b.time - a.time || b.periodStart - a.periodStart
+    : (a, b) => a.time - b.time);
+  for (const estimate of estimates) {
     if (results.some((event) => event.time > estimate.periodStart &&
       (event.periodStart ?? event.time) <= estimate.time)) continue;
     results.push(estimate);

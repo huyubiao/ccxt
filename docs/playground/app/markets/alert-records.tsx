@@ -79,58 +79,59 @@ export default function AlertRecords({ records, canDelete, onDelete }: {
       )}
       {error && <p role="alert">{error}</p>}
       {deletedCount > 0 && <p role="status">已删除 {deletedCount} 条告警记录。</p>}
-      {records.length === 0 ? <p role="status">暂无告警记录。</p> : (
-        <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
-          <table className={styles.alertTable}>
-            <thead><tr>
-              <th scope="col">
-                <label className={styles.alertSelectAll}>
-                  <input type="checkbox" checked={allSelected} disabled={deleting}
-                    aria-label="全选当前显示的告警记录"
-                    ref={(input) => { if (input) input.indeterminate = partlySelected; }}
-                    onChange={(event) => selectAll(event.currentTarget.checked)} />
-                  全选
-                </label>
-              </th>
-              <th scope="col">交易对</th><th scope="col">告警级别</th><th scope="col">触发时间</th>
-              <th scope="col">参考价/触发价 (USDT)</th>
-              <th scope="col" title="按北京时间当日开盘价到触发价计算">当日涨跌幅度</th>
-              <th scope="col">窗口涨跌幅/阈值</th><th scope="col">窗口 (秒)</th>
-              <th scope="col">成交额 (USDT)</th><th scope="col">核验结果</th>
-            </tr></thead>
-            <tbody>
-              {records.map((row) => {
-                const key = spikeKey(row);
-                const triggerTime = formatTime.format(row.time);
-                const open = opens.get(dayKey(row));
-                const change = open === undefined ? NaN : (row.price - open) / open * 100;
-                const dailyChange = Number.isFinite(change) ? change : null;
-                return <tr key={key}>
-                  <td>
-                    <input type="checkbox" checked={selected.has(key)} disabled={deleting}
-                      aria-label={`选择 ${row.symbol} ${triggerTime} ${row.threshold > 0 ? "上涨" : "下跌"}告警`}
-                      onChange={(event) => select(key, event.target.checked)} />
-                  </td>
-                  <th scope="row">{row.symbol}</th>
-                  <td>{row.level} 级</td>
-                  <td><time dateTime={new Date(row.time).toISOString()}>{triggerTime}</time></td>
-                  <td>{formatMarketPriceRange(row.previous, row.price, formatPrice, " / ")}</td>
-                  <td className={dailyChange === null || dailyChange === 0 ? undefined : dailyChange < 0 ? styles.sell : styles.buy}>
-                    {dailyChange === null ? "—" : `${formatChange.format(dailyChange)}%`}
-                  </td>
-                  <td><span className={row.change < 0 ? styles.sell : styles.buy}>{formatChange.format(row.change)}%</span>
-                    {" / "}{formatThreshold.format(row.threshold)}%</td>
-                  <td>{row.seconds}</td>
-                  <td>{formatAlertTurnover(row.volume, row.legacyMultiple) ?? formatMarketAmount(row.volume?.turnover)}</td>
-                  <td title={row.requiredMultiple === null ? undefined : `成交额门槛 ${row.requiredMultiple} 倍`}>
-                    {spikeStatusLabels[row.status]}
-                  </td>
-                </tr>;
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
+        <table className={styles.alertTable}>
+          <thead><tr>
+            <th scope="col">
+              <label className={styles.alertSelectAll}>
+                <input type="checkbox" checked={allSelected} disabled={deleting || records.length === 0}
+                  aria-label="全选当前显示的告警记录"
+                  ref={(input) => { if (input) input.indeterminate = partlySelected; }}
+                  onChange={(event) => selectAll(event.currentTarget.checked)} />
+                全选
+              </label>
+            </th>
+            <th scope="col">交易对</th><th scope="col">告警级别</th><th scope="col">触发时间</th>
+            <th scope="col">参考价/触发价 (USDT)</th>
+            <th scope="col" title="按北京时间当日开盘价到触发价计算">当日涨跌幅度</th>
+            <th scope="col">窗口涨跌幅/阈值</th><th scope="col">窗口 (秒)</th>
+            <th scope="col">成交额 (USDT)</th><th scope="col">核验结果</th>
+          </tr></thead>
+          <tbody>
+            {records.length === 0 && (
+              <tr><td colSpan={10} className={styles.emptyTableCell}><span role="status">暂无告警记录。</span></td></tr>
+            )}
+            {records.map((row) => {
+              const key = spikeKey(row);
+              const triggerTime = formatTime.format(row.time);
+              const open = opens.get(dayKey(row));
+              const change = open === undefined ? NaN : (row.price - open) / open * 100;
+              const dailyChange = Number.isFinite(change) ? change : null;
+              return <tr key={key}>
+                <td>
+                  <input type="checkbox" checked={selected.has(key)} disabled={deleting}
+                    aria-label={`选择 ${row.symbol} ${triggerTime} ${row.threshold > 0 ? "上涨" : "下跌"}告警`}
+                    onChange={(event) => select(key, event.target.checked)} />
+                </td>
+                <th scope="row">{row.symbol}</th>
+                <td>{row.level} 级</td>
+                <td><time dateTime={new Date(row.time).toISOString()}>{triggerTime}</time></td>
+                <td>{formatMarketPriceRange(row.previous, row.price, formatPrice, " / ")}</td>
+                <td className={dailyChange === null || dailyChange === 0 ? undefined : dailyChange < 0 ? styles.sell : styles.buy}>
+                  {dailyChange === null ? "—" : `${formatChange.format(dailyChange)}%`}
+                </td>
+                <td><span className={row.change < 0 ? styles.sell : styles.buy}>{formatChange.format(row.change)}%</span>
+                  {" / "}{formatThreshold.format(row.threshold)}%</td>
+                <td>{row.seconds}</td>
+                <td>{formatAlertTurnover(row.volume, row.legacyMultiple) ?? formatMarketAmount(row.volume?.turnover)}</td>
+                <td title={row.requiredMultiple === null ? undefined : `成交额门槛 ${row.requiredMultiple} 倍`}>
+                  {spikeStatusLabels[row.status]}
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
     </details>
   );
 }

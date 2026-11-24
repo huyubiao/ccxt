@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { createInterface } from "node:readline";
@@ -9,7 +9,9 @@ for (const file of [".env.local", ".env"]) {
   if (existsSync(file)) loadEnvFile(file);
 }
 
-const target = resolve("market-service", "target");
+const marketService = resolve("market-service");
+const manifest = resolve(marketService, "Cargo.toml");
+const target = resolve(marketService, "target");
 const production = process.argv[2] === "--production";
 const monitorOnly = process.argv[2] === "--monitor-only";
 const appPort = process.env.PLAYGROUND_PORT || process.env.PORT || "3000";
@@ -19,15 +21,18 @@ const windows = process.platform === "win32";
 const executable = `playground-market-service${windows ? ".exe" : ""}`;
 
 async function selectBackend() {
-  if (production) return resolve("market-service", "bin", executable);
+  if (production) return resolve(marketService, "bin", executable);
 
   const platform = `${process.platform}-${process.arch}`;
-  const prebuilt = resolve("market-service", "bin", platform, executable);
+  const prebuilt = resolve(marketService, "bin", platform, executable);
   if (process.env.PLAYGROUND_BUILD_RUST !== "1" && existsSync(prebuilt)) {
-    console.log(`使用预编译 Rust 行情服务（${platform}）。`);
-    return prebuilt;
+    if (!existsSync(manifest) || !hasNewerBackendInputs(prebuilt)) {
+      console.log(`使用预编译 Rust 行情服务（${platform}）。`);
+      return prebuilt;
+    }
+    console.log("Rust 行情服务的源码或数据快照已更新，正在重新编译。");
   }
-  if (!existsSync(resolve("market-service", "Cargo.toml"))) {
+  if (!existsSync(manifest)) {
     throw new Error(`缺少适用于 ${platform} 的 Rust 后端，请将预编译文件放到 ${prebuilt}。`);
   }
   const build = await buildRust();
@@ -35,8 +40,19 @@ async function selectBackend() {
   return resolve(target, "debug", executable);
 }
 
+function hasNewerBackendInputs(prebuilt) {
+  const builtAt = statSync(prebuilt).mtimeMs;
+  const entries = [
+    ...readdirSync(resolve(marketService, "src"), { withFileTypes: true, recursive: true }),
+    ...readdirSync(resolve("lib"), { withFileTypes: true }).filter((entry) => entry.name.endsWith(".json")),
+  ];
+  return [manifest, resolve(marketService, "Cargo.lock"), resolve("scripts", "reviewed-unlocks.json"),
+    ...entries.filter((entry) => entry.isFile()).map((entry) => resolve(entry.parentPath, entry.name)),
+  ].some((file) => statSync(file).mtimeMs > builtAt);
+}
+
 function buildRust() {
-  const args = ["build", "--locked", "--manifest-path", "market-service/Cargo.toml", "--target-dir", target];
+  const args = ["build", "--locked", "--manifest-path", manifest, "--target-dir", target];
   const rustupHome = resolve("..", "..", "tmp", "playground-rustup");
   const architecture = { x64: "x86_64", arm64: "aarch64", ia32: "i686" }[process.arch];
   const toolchain = resolve(rustupHome, "toolchains", `stable-${architecture}-pc-windows-msvc`, "bin");

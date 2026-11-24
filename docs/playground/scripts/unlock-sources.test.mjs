@@ -119,3 +119,39 @@ test("the calendar can supply a verified event if token details are unavailable"
   const mismatch = await fetchUnlockSnapshot(identity, { ...options, calendar: { ...options.calendar, symbol: "OTHER" } });
   assert.equal(mismatch.refreshed, false);
 });
+
+test("imports completed release intervals and keeps older details across refreshes", async () => {
+  const day = 86_400_000;
+  const now = time + 3 * day;
+  const prior = { events: [{
+    symbol: "TEST", time: time - day, amount: 5, mechanism: "cliff",
+    allocationComplete: true, allocations: [{ name: "Investors", amount: 5, group: "insiders" }],
+    sourceName: "DefiLlama", sourceUrl: "https://defillama.com/unlocks/test-token",
+  }] };
+  const source = { geckoId: "test-token", base: "TEST" };
+  const { token } = await fetchUnlockSnapshot(source, {
+    now, prior,
+    request: async (url) => {
+      if (url.includes("/cryptocurrency/detail?")) {
+        return { status: { error_code: 0 }, data: {
+          id: 1, slug: "test-token", symbol: "TEST", statistics: { maxSupply: 1000 },
+          tokenUnlockLatest: { tokenLockedAmount: 800, nextUnlocked: { date: time + 5 * day, tokenAmount: 50 } },
+        } };
+      }
+      return { status: { error_code: 0 }, data: {
+        tokenHistory: [[time, 100], [time + day, 110], [time + 4 * day, 140]].map(([at, amount]) => ({
+          time: new Date(at).toISOString(), amount, allocationName: "Team", version: 1,
+        })),
+      } };
+    },
+  });
+  assert.deepEqual(token.recentUnlocks.map(({ time, amount }) => [time, amount]), [[time + day, 10], [time - day, 5]]);
+  assert.equal(token.recentUnlocks[0].periodStart, time);
+  assert.equal(token.recentUnlocks[0].allocations[0].name, "Team");
+  assert.deepEqual(token.events.map(({ time }) => time), [time + 5 * day]);
+  const failed = await fetchUnlockSnapshot(source, {
+    now: now + 3 * day, prior: token,
+    request: async () => { throw new Error("source unavailable"); },
+  });
+  assert.equal(failed.token, token);
+});

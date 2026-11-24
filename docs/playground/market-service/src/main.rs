@@ -17,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::net::TcpListener;
 
+const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 #[tokio::main]
 async fn main() -> store::Result<()> {
     let address = std::env::var("PLAYGROUND_MARKET_SERVICE_BIND")

@@ -39,12 +39,12 @@ export default function AutoOrders({ records, canDelete, onDelete }: {
         </div>}
         {error && <p role="alert">{error}</p>}
         {deletedCount > 0 && <p role="status">已删除 {deletedCount} 条自动下单任务记录。</p>}
-        {records.length > 0 && <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
+        <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
           <table className={styles.alertTable}>
             <thead><tr>
               <th scope="col">
                 <label className={styles.alertSelectAll}>
-                  <input type="checkbox" checked={allSelected} disabled={deleting}
+                  <input type="checkbox" checked={allSelected} disabled={deleting || records.length === 0}
                     aria-label="全选当前显示的自动下单任务记录"
                     ref={(input) => { if (input) input.indeterminate = partlySelected; }}
                     onChange={(event) => selectAll(event.currentTarget.checked)} />
@@ -56,6 +56,9 @@ export default function AutoOrders({ records, canDelete, onDelete }: {
               <th scope="col">监控状态</th>
             </tr></thead>
             <tbody>
+              {records.length === 0 && (
+                <tr><td colSpan={7} className={styles.emptyTableCell}><span role="status">暂无自动下单任务。</span></td></tr>
+              )}
               {records.map((row) => {
                 const { symbol, strategy, time, status, quote, failure } = row;
                 const key = autoOrderWatchKey(row);
@@ -75,7 +78,7 @@ export default function AutoOrders({ records, canDelete, onDelete }: {
               })}
             </tbody>
           </table>
-        </div>}
+        </div>
       </div>
     </details>
   );
@@ -88,25 +91,26 @@ export function StrategyOrderRequests({ strategyId, requests }: { strategyId: st
       <summary className={styles.monitorSectionSummary}>
         <h4>下单请求 <span>{strategyRequests.length} 条</span></h4>
       </summary>
-      {strategyRequests.length === 0 ? <p role="status">暂无下单请求。</p> : (
-        <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
-          <table className={styles.alertTable}>
-            <thead><tr>
-              <th scope="col">交易对</th><th scope="col">请求编号</th><th scope="col">方向</th>
-              <th scope="col">数量</th><th scope="col">请求时间</th>
-            </tr></thead>
-            <tbody>
-              {strategyRequests.map((request) => <tr key={autoOrderRequestKey(request)}>
-                <th scope="row">{request.symbol}</th>
-                <td>{request.id}</td>
-                <td>{request.side === "buy" ? "买入" : "卖出"}</td>
-                <td>{fullMarketNumber.format(request.amount)}</td>
-                <td><time dateTime={new Date(request.time).toISOString()}>{formatTime.format(request.time)}</time></td>
-              </tr>)}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
+        <table className={styles.alertTable}>
+          <thead><tr>
+            <th scope="col">交易对</th><th scope="col">请求编号</th><th scope="col">方向</th>
+            <th scope="col">数量</th><th scope="col">请求时间</th>
+          </tr></thead>
+          <tbody>
+            {strategyRequests.length === 0 && (
+              <tr><td colSpan={5} className={styles.emptyTableCell}><span role="status">暂无下单请求。</span></td></tr>
+            )}
+            {strategyRequests.map((request) => <tr key={autoOrderRequestKey(request)}>
+              <th scope="row">{request.symbol}</th>
+              <td>{request.id}</td>
+              <td>{request.side === "buy" ? "买入" : "卖出"}</td>
+              <td>{fullMarketNumber.format(request.amount)}</td>
+              <td><time dateTime={new Date(request.time).toISOString()}>{formatTime.format(request.time)}</time></td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
     </details>
   );
 }

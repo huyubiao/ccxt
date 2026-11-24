@@ -46,8 +46,19 @@ struct ExchangeSymbol {
     quote_asset: String,
     margin_asset: String,
     contract_type: String,
+    underlying_type: Option<String>,
     status: String,
     onboard_date: i64,
+}
+
+impl ExchangeSymbol {
+    fn is_crypto_perpetual(&self) -> bool {
+        self.status == "TRADING"
+            && self.quote_asset == "USDT"
+            && self.margin_asset == "USDT"
+            && self.contract_type == "PERPETUAL"
+            && matches!(self.underlying_type.as_deref(), Some("COIN" | "PREMARKET"))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -142,15 +153,7 @@ impl Binance {
         let mut contracts: Vec<_> = info
             .symbols
             .into_iter()
-            .filter(|market| {
-                market.status == "TRADING"
-                    && market.quote_asset == "USDT"
-                    && market.margin_asset == "USDT"
-                    && matches!(
-                        market.contract_type.as_str(),
-                        "PERPETUAL" | "TRADIFI_PERPETUAL"
-                    )
-            })
+            .filter(ExchangeSymbol::is_crypto_perpetual)
             .map(|market| Contract {
                 id: market.symbol,
                 base: market.base_asset,
@@ -403,4 +406,30 @@ pub fn number(value: &Value) -> Option<f64> {
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())?;
     number.is_finite().then_some(number)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_keeps_only_trading_usdt_crypto_perpetuals() {
+        for (symbol, contract_type, underlying_type, expected) in [
+            ("BTCUSDT", "PERPETUAL", Some("COIN"), true),
+            ("PREDICTUSDT", "PERPETUAL", Some("PREMARKET"), true),
+            ("HANMIUSDT", "TRADIFI_PERPETUAL", Some("KR_EQUITY"), false),
+            ("NATGASUSDT", "TRADIFI_PERPETUAL", Some("COMMODITY"), false),
+            ("OPENAIUSDT", "TRADIFI_PERPETUAL", Some("PREMARKET"), false),
+            ("BTCDOMUSDT", "PERPETUAL", Some("INDEX"), false),
+            ("UNKNOWNUSDT", "PERPETUAL", None, false),
+        ] {
+            let market: ExchangeSymbol = serde_json::from_value(json!({
+                "symbol": symbol, "baseAsset": "TEST", "quoteAsset": "USDT",
+                "marginAsset": "USDT", "contractType": contract_type, "status": "TRADING",
+                "underlyingType": underlying_type, "onboardDate": 1,
+            }))
+            .unwrap();
+            assert_eq!(market.is_crypto_perpetual(), expected, "{symbol}");
+        }
+    }
 }

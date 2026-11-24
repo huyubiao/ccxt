@@ -281,6 +281,7 @@ impl Research {
 
     pub fn new(markets: Arc<Markets>) -> crate::store::Result<Self> {
         let client = Client::builder()
+            .user_agent(crate::HTTP_USER_AGENT)
             .timeout(Duration::from_secs(8))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;

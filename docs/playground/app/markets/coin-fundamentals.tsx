@@ -29,18 +29,25 @@ const groups: { id: UnlockAllocation["group"]; title: string }[] = [
   { id: "other", title: "其他或未分类" },
 ];
 
-function Allocation({ unlock, price }: { unlock: CoinUnlock; price: number | null }) {
-  const { symbol: coin, allocationComplete } = unlock;
+function Allocation({ unlock, price, historical = false }: {
+  unlock: CoinUnlock & { supplyPercentage?: number | null };
+  price: number | null;
+  historical?: boolean;
+}) {
+  const { symbol: coin, allocationComplete, supplyPercentage } = unlock;
+  const dateLabel = historical ? unlock.timeKind === "interval-estimate" ? "释放区间" : "解锁时间"
+    : unlock.mechanism === "linear" ? "下次计划释放（线性）" : "下次计划解锁";
 
   return (
     <>
       <dl className={styles.metrics}>
-        <div><dt>{unlock.mechanism === "linear" ? "下次计划释放（线性）" : "下次计划解锁"}</dt>
+        <div><dt>{dateLabel}</dt>
           <dd>{unlock.timeKind === "interval-estimate" && unlock.periodStart != null
             ? `${time.format(unlock.periodStart)} 至 ${time.format(unlock.time)}（区间估算）`
             : <time dateTime={new Date(unlock.time).toISOString()}>{time.format(unlock.time)}</time>}</dd></div>
         <div><dt>解锁数量</dt><dd>{tokens(unlock.amount)} {coin}</dd></div>
         <div><dt>解锁估值</dt><dd>{usd(price === null ? null : unlock.amount * price)}</dd></div>
+        {historical && <div><dt>占总量</dt><dd>{supplyPercentage == null ? "—" : `${supplyPercentage.toFixed(4)}%`}</dd></div>}
       </dl>
       {unlock.allocations.length > 0 ? (
         <div className={styles.tableScroll}>
@@ -113,6 +120,7 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
       <a className={styles.fundamentalsLink} href={data.sourceUrl} target="_blank" rel="noreferrer">{data.sourceName} 发行规则</a>
     </>;
   }
+  const recentUnlocks = data.recentUnlocks ?? [];
   return <>
     <dl className={styles.metrics}>
       <div><dt>待解锁数量</dt><dd>{data.lockedAmount === null ? "未核实" : `${tokens(data.lockedAmount)} ${data.symbol}`}</dd></div>
@@ -151,6 +159,17 @@ function SupplySchedule({ data, price }: { data: Tokenomics; price: number | nul
     {data.events.some((event) => event.timeKind === "interval-estimate") && <p className={styles.fundamentalsNote}>
       区间估算来自释放曲线相邻采样点的增量，实际解锁可能发生在区间内的不同时间。
     </p>}
+    <h5 className={styles.unlockHistoryTitle}>最近已解锁</h5>
+    {recentUnlocks.length > 0 ? <>
+      {recentUnlocks.map((event) => <details key={`${event.time}:${event.mechanism}:${event.sourceName}:${event.amount}`}>
+        <summary className={styles.researchSummary}>
+          <time dateTime={new Date(event.time).toISOString()}>{time.format(event.time)}</time>
+          {" · "}{releaseLabel(event)}{" · "}{tokens(event.amount)} {event.symbol}
+        </summary>
+        <Allocation unlock={event} price={price} historical />
+      </details>)}
+      <p className={styles.fundamentalsNote}>历史记录按来源排期或释放曲线整理。区间估算以区间结束时间排序。</p>
+    </> : <p className={styles.fundamentalsNote}>暂无可核实的历史解锁记录。</p>}
   </>;
 }
 
@@ -212,7 +231,7 @@ export default function CoinFundamentals({ symbol }: { symbol: string }) {
             <h4>解锁与分配</h4>
             {data?.tokenomics ? <SupplySchedule data={data.tokenomics} price={market?.price ?? null} />
               : <p className={styles.fundamentalsNote} role="status">
-                {data ? "本地快照没有该币种的未来解锁记录，或记录已到期。"
+                {data ? "本地快照没有该币种的解锁记录。"
                   : error ? "暂时无法读取解锁快照。" : "正在读取解锁快照…"}
               </p>}
             {snapshotAt != null && <p className={styles.fundamentalsNote}>{data?.tokenomics?.kind === "staking" ? "发行规则核对于" : "本地快照更新于"}{" "}

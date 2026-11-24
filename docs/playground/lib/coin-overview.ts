@@ -30,6 +30,11 @@ export type CoinUnlock = {
   sourceChecks?: { sourceName: string; sourceUrl: string; amount: number; agrees: boolean }[];
 };
 
+export type UnlockEvent = CoinUnlock & {
+  timeKind: "scheduled" | "interval-estimate";
+  supplyPercentage: number | null;
+};
+
 export type Tokenomics = {
   symbol: string;
   kind: "vesting" | "mining" | "staking" | "unknown";
@@ -38,7 +43,8 @@ export type Tokenomics = {
   maxSupply: number | null;
   percentageSupply: number | null;
   percentageBasis: "maxSupply" | "totalSupply" | null;
-  events: (CoinUnlock & { timeKind: "scheduled" | "interval-estimate"; supplyPercentage: number | null })[];
+  events: UnlockEvent[];
+  recentUnlocks?: UnlockEvent[];
   nextCliff?: CoinUnlock;
   mining: {
     blockHeight: number;

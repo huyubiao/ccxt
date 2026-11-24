@@ -1,5 +1,5 @@
 import aliases from "../lib/coin-source-aliases.json" with { type: "json" };
-import { allocationGroup, llamaToken, mergeUnlockEvents, releaseGroup, reviewedToken, tokenomistToken, tokenSymbol } from "./unlock-sources.mjs";
+import { allocationGroup, isCompletedUnlock, llamaToken, mergeUnlockEvents, recentUnlocks, releaseGroup, reviewedToken, tokenomistToken, tokenSymbol } from "./unlock-sources.mjs";
 
 function positiveNumber(value) {
   if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
@@ -51,7 +51,7 @@ async function readCurve(id, range, request) {
   return result.data.tokenHistory;
 }
 
-function curveEvents(history, template, now) {
+function curveEvents(history, template) {
   const points = new Map();
   for (const row of history) {
     const time = Date.parse(row.time);
@@ -65,7 +65,7 @@ function curveEvents(history, template, now) {
   for (let i = 1; i < sorted.length; i++) {
     const [start, previous] = sorted[i - 1];
     const [time, current] = sorted[i];
-    if (start < now || current.size !== previous.size) continue;
+    if (current.size !== previous.size) continue;
     const allocations = [];
     let valid = true;
     for (const [name, row] of current) {
@@ -106,10 +106,17 @@ async function describeToken(identity, calendar, now, request) {
   }
   const sourceUrl = `https://coinmarketcap.com/currencies/${encodeURIComponent(detail.slug)}/#token-unlocks`;
   const template = { symbol: detail.symbol, sourceUrl };
-  if (events.length || lockedAmount > 0) {
+  const hasFuture = events.length > 0 || lockedAmount > 0;
+  const history = [];
+  if (hasFuture || lockedAmount !== null) {
     const histories = await Promise.all(["1M", "1Y"].map((range) => readCurve(detail.id, range, request).catch(() => [])));
-    const estimates = histories.flatMap((history) => curveEvents(history, template, now)).sort((a, b) => a.time - b.time);
+    const estimates = histories.flatMap((history) => curveEvents(history, template)).sort((a, b) => a.time - b.time);
     for (const event of estimates) {
+      if (isCompletedUnlock(event, now)) {
+        history.push(event);
+        continue;
+      }
+      if (!hasFuture) break;
       const cutoff = events.at(-1)?.time ?? now;
       if (event.periodStart < cutoff) continue;
       events.push(event);
@@ -121,7 +128,7 @@ async function describeToken(identity, calendar, now, request) {
     lockedAmount, maxSupply, supplyLimit,
     percentageSupply: maxSupply ?? totalSupply,
     percentageBasis: maxSupply ? "maxSupply" : totalSupply ? "totalSupply" : null,
-    events, sourceUrl, sourceName: "CoinMarketCap",
+    events, history, sourceUrl, sourceName: "CoinMarketCap",
   };
 }
 
@@ -151,13 +158,17 @@ export async function fetchUnlockSnapshot(identity, { calendar = null, prior = n
   const cmcSlug = aliases[identity.geckoId] ?? identity.geckoId;
   const calendarEvents = !cmc && calendar?.slug === cmcSlug && calendar.symbol?.toUpperCase() === tokenSymbol(identity)
     ? parseUnlock(calendar, now) : [];
-  const events = mergeUnlockEvents([
+  const candidates = [
     ...(llama?.events ?? []), ...(reviewed?.events ?? []), ...(tokenomist?.events ?? []), ...(cmc?.events ?? calendarEvents),
-  ], now);
+  ];
+  const events = mergeUnlockEvents(candidates, now);
+  const historical = [...candidates, ...(cmc?.history ?? [])];
+  const refreshed = Boolean(cmc || events.length || historical.some((event) => isCompletedUnlock(event, now)));
   const metadata = cmc ?? prior;
   let token = metadata;
-  if (cmc || events.length || (reviewed && !prior)) {
-    const previousEvents = prior?.events ?? [];
+  if (refreshed || (reviewed && !prior)) {
+    const previousEvents = prior?.events ?? (Number.isFinite(prior?.time) ? [prior] : []);
+    const history = recentUnlocks([...historical, ...previousEvents, ...(prior?.recentUnlocks ?? [])], now);
     const updatedGroups = new Set(events.map((event) => `${event.sourceName}:${releaseGroup(event)}`));
     const carried = previousEvents.filter((event) =>
       ((event.sourceName === "DefiLlama" && !llama) ||
@@ -172,7 +183,7 @@ export async function fetchUnlockSnapshot(identity, { calendar = null, prior = n
       return known ? { ...event, allocations: known.allocations, allocationComplete: true } : event;
     });
     const supply = (reviewed?.maxSupply != null ? reviewed : null) ??
-      (cmc?.percentageSupply != null ? cmc : prior ?? metadata) ?? releases[0] ?? reviewed;
+      (cmc?.percentageSupply != null ? cmc : prior ?? metadata) ?? releases[0] ?? reviewed ?? history[0];
     const reviewedCap = reviewed?.maxSupply ?? null;
     token = {
       symbol: tokenSymbol(identity), geckoId: identity.geckoId, cmcSlug: metadata?.cmcSlug,
@@ -181,9 +192,9 @@ export async function fetchUnlockSnapshot(identity, { calendar = null, prior = n
       supplyLimit: reviewedCap !== null ? "capped" : supply.supplyLimit ?? "unknown",
       percentageSupply: reviewedCap ?? supply.percentageSupply ?? null,
       percentageBasis: reviewedCap !== null ? "maxSupply" : supply.percentageBasis ?? null,
-      events: releases, sourceName: supply.sourceName, sourceUrl: supply.sourceUrl,
+      events: releases, recentUnlocks: history, sourceName: supply.sourceName, sourceUrl: supply.sourceUrl,
       updatedAt: releases.length && !events.length ? prior?.updatedAt : now,
     };
   }
-  return { token, refreshed: Boolean(cmc || events.length) };
+  return { token, refreshed };
 }
