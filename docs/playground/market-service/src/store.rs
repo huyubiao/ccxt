@@ -331,11 +331,8 @@ fn read_rule(db: &Connection) -> Result<Option<Rule>> {
     let Some(saved) = saved else {
         return Ok(None);
     };
-    let mut rule: Rule = serde_json::from_str(&saved)?;
-    rule.up = rule.up.map(|up| up.max(2.0));
-    rule.down = rule.down.map(|down| down.min(-2.0));
-    rule.seconds = rule.seconds.max(10);
-    Ok(Some(rule))
+    let rule: Rule = serde_json::from_str(&saved)?;
+    Ok(Some(rule.restore_saved()))
 }
 
 fn query_json(db: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Value>> {
@@ -356,6 +353,26 @@ pub fn spike_id(event: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_legacy_rule_with_current_alert_limits() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut rule = Rule {
+            up: Some(130.0),
+            down: None,
+            turnover_multiple: 1.25,
+            ..Rule::default()
+        };
+        store.save_rule(rule).unwrap();
+        let restored = store.rule().unwrap();
+        assert_eq!(restored.up, Some(100.0));
+        assert_eq!(restored.down, None);
+        assert_eq!(restored.turnover_multiple, 2.0);
+        assert!(restored.is_valid());
+        rule.turnover_multiple = 120.0;
+        store.save_rule(rule).unwrap();
+        assert_eq!(store.rule().unwrap().turnover_multiple, 100.0);
+    }
 
     #[test]
     fn disable_discards_signals_and_prevents_a_stale_worker_from_reopening_a_watch() {

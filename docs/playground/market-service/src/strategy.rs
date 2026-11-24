@@ -7,6 +7,9 @@ pub const MIN_WINDOW_SECONDS: u32 = 10;
 pub const MAX_WINDOW_SECONDS: u32 = 300;
 pub const MARKET_SPIKE_NAME: &str = "异动监控";
 const MIN_PERCENT: f64 = 2.0;
+const MAX_PERCENT: f64 = 100.0;
+const MIN_TURNOVER_MULTIPLE: f64 = 2.0;
+const MAX_TURNOVER_MULTIPLE: f64 = 100.0;
 const BASELINE_MINUTES: usize = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -23,13 +26,22 @@ pub struct Rule {
 impl Rule {
     pub fn is_valid(self) -> bool {
         (self.up.is_some() || self.down.is_some())
-            && self.up.is_none_or(|up| up.is_finite() && up >= MIN_PERCENT)
+            && self.up.is_none_or(|up| (MIN_PERCENT..=MAX_PERCENT).contains(&up))
             && self
                 .down
-                .is_none_or(|down| (-100.0 < down) && down <= -MIN_PERCENT)
+                .is_none_or(|down| (-MAX_PERCENT..=-MIN_PERCENT).contains(&down))
             && (MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).contains(&self.seconds)
-            && self.turnover_multiple.is_finite()
-            && self.turnover_multiple > 1.0
+            && (MIN_TURNOVER_MULTIPLE..=MAX_TURNOVER_MULTIPLE).contains(&self.turnover_multiple)
+    }
+
+    pub fn restore_saved(mut self) -> Self {
+        self.up = self.up.map(|up| up.clamp(MIN_PERCENT, MAX_PERCENT));
+        self.down = self.down.map(|down| down.clamp(-MAX_PERCENT, -MIN_PERCENT));
+        self.seconds = self.seconds.max(MIN_WINDOW_SECONDS);
+        self.turnover_multiple = self
+            .turnover_multiple
+            .clamp(MIN_TURNOVER_MULTIPLE, MAX_TURNOVER_MULTIPLE);
+        self
     }
 }
 
@@ -268,6 +280,27 @@ fn crossed_level(start: f64, start_level: u32, sample: Sample, threshold: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_validates_percentage_and_turnover_limits_inclusively() {
+        let mut rule = Rule {
+            up: Some(100.0),
+            down: Some(-100.0),
+            turnover_multiple: 2.0,
+            ..Rule::default()
+        };
+        assert!(rule.is_valid());
+        rule.turnover_multiple = 100.0;
+        assert!(rule.is_valid());
+        for invalid in [
+            Rule { up: Some(100.01), ..rule },
+            Rule { down: Some(-100.01), ..rule },
+            Rule { turnover_multiple: 1.99, ..rule },
+            Rule { turnover_multiple: 100.01, ..rule },
+        ] {
+            assert!(!invalid.is_valid());
+        }
+    }
 
     fn sample(time: i64, price: f64) -> Sample {
         Sample { time, price }

@@ -9,9 +9,10 @@ import {
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
 import {
-  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_SECONDS, MIN_ALERT_PERCENT, MIN_ALERT_SECONDS,
-  getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
-  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries, spikeKey,
+  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_PERCENT, MAX_ALERT_SECONDS, MAX_TURNOVER_MULTIPLE,
+  MIN_ALERT_PERCENT, MIN_ALERT_SECONDS, MIN_TURNOVER_MULTIPLE,
+  clampAlertThreshold, clampTurnoverMultiple, getTurnoverMultiple, parseAlertSeconds,
+  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceSeries, spikeKey,
   type AlertTurnover, type AlertVolume, type DirectionalThresholds,
   type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries, type SpikeIdentity, type SpikeRecord,
 } from "@/lib/price-alerts";
@@ -174,7 +175,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
         setSeconds(savedSeconds);
         setSecondsInput(String(savedSeconds));
       }
-      const savedMultiple = parseTurnoverMultiple(localStorage.getItem(TURNOVER_STORAGE_KEY) ?? "");
+      const savedMultiple = restoreTurnoverMultiple(localStorage.getItem(TURNOVER_STORAGE_KEY) ?? "");
       if (savedMultiple !== null) {
         activeRule.current.turnoverMultiple = savedMultiple;
         setTurnoverMultiple(savedMultiple);
@@ -480,19 +481,38 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     void background.save({ ...rule, ...change });
   }
 
+  function normalizeThreshold(direction: keyof DirectionalThresholds) {
+    const [value, setInput] = direction === "up" ? [upInput, setUpInput] : [downInput, setDownInput];
+    const threshold = clampAlertThreshold(value, direction);
+    if (threshold !== null) {
+      setInput(String(Math.abs(threshold)));
+      setInvalid((current) => current === direction ? null : current);
+    }
+    return threshold;
+  }
+
+  function normalizeTurnoverInput() {
+    const multiple = clampTurnoverMultiple(turnoverInput);
+    if (multiple !== null) {
+      setTurnoverInput(String(multiple));
+      setInvalid((current) => current === "turnover" ? null : current);
+    }
+    return multiple;
+  }
+
   function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const up = upSelected ? parseAlertThreshold(upInput) : null;
-    const downValue = downSelected ? parseAlertThreshold(downInput) : null;
+    const up = upSelected ? normalizeThreshold("up") : null;
+    const down = downSelected ? normalizeThreshold("down") : null;
     const nextSeconds = parseAlertSeconds(secondsInput);
-    const nextMultiple = parseTurnoverMultiple(turnoverInput);
+    const nextMultiple = normalizeTurnoverInput();
     const error = nextSeconds === null ? "seconds" : !upSelected && !downSelected ? "directions"
-      : upSelected && (up === null || up <= 0) ? "up"
-      : downSelected && (downValue === null || Math.abs(downValue) >= 100) ? "down"
+      : upSelected && up === null ? "up"
+      : downSelected && down === null ? "down"
       : nextMultiple === null ? "turnover" : null;
     setInvalid(error);
     if (error || nextSeconds === null || nextMultiple === null) return;
-    const next: DirectionalThresholds = { up, down: downValue === null ? null : -Math.abs(downValue) };
+    const next: DirectionalThresholds = { up, down };
     if (server) {
       saveServerRule({ ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple });
       return;
@@ -540,18 +560,21 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
               aria-invalid={invalid === "seconds"} aria-describedby="alert-window-help" placeholder={String(DEFAULT_ALERT_SECONDS)} />
             <label className={styles.monitorSwitch}>
               <input type="checkbox" checked={upSelected} onChange={(event) => setUpSelected(event.target.checked)} aria-describedby="alert-up-help" />
-              上涨幅度（≥ {MIN_ALERT_PERCENT}%）
+              上涨幅度（{MIN_ALERT_PERCENT}%–{MAX_ALERT_PERCENT}%）
             </label>
             <input aria-label="上涨阈值" value={upInput} disabled={!upSelected} onChange={(event) => setUpInput(event.target.value)}
+              onBlur={() => normalizeThreshold("up")}
               aria-invalid={invalid === "up"} aria-describedby="alert-up-help" placeholder="5" />
             <label className={styles.monitorSwitch}>
               <input type="checkbox" checked={downSelected} onChange={(event) => setDownSelected(event.target.checked)} aria-describedby="alert-down-help" />
-              下跌幅度（≥ {MIN_ALERT_PERCENT}%）
+              下跌幅度（{MIN_ALERT_PERCENT}%–{MAX_ALERT_PERCENT}%）
             </label>
             <input aria-label="下跌阈值" value={downInput} disabled={!downSelected} onChange={(event) => setDownInput(event.target.value)}
+              onBlur={() => normalizeThreshold("down")}
               aria-invalid={invalid === "down"} aria-describedby="alert-down-help" placeholder="5" />
-            <label htmlFor="alert-turnover-multiple">告警成交额倍数</label>
+            <label htmlFor="alert-turnover-multiple">告警成交额倍数（{MIN_TURNOVER_MULTIPLE}–{MAX_TURNOVER_MULTIPLE} 倍）</label>
             <input id="alert-turnover-multiple" inputMode="decimal" value={turnoverInput} onChange={(event) => setTurnoverInput(event.target.value)}
+              onBlur={normalizeTurnoverInput}
               aria-invalid={invalid === "turnover"} aria-describedby="alert-turnover-help alert-turnover-baseline" />
             <button type="submit" disabled={!canEdit}>保存设置</button>
             <button type="button" disabled={!canEdit || (!strategyNotify && dingTalkConfig === "checking")}
@@ -567,9 +590,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
           </p>
           {invalid === "seconds" && <p role="alert">请输入 {MIN_ALERT_SECONDS} 至 {MAX_ALERT_SECONDS} 之间的整数秒数。</p>}
           {invalid === "directions" && <p role="alert">请至少勾选上涨幅度或下跌幅度。</p>}
-          {invalid === "up" && <p role="alert">上涨阈值须至少为 {MIN_ALERT_PERCENT}%。</p>}
-          {invalid === "down" && <p role="alert">下跌幅度须至少为 {MIN_ALERT_PERCENT}%，且小于 100%。</p>}
-          {invalid === "turnover" && <p role="alert">成交额倍数须大于 1。</p>}
+          {invalid === "up" && <p role="alert">请输入有效的上涨幅度。</p>}
+          {invalid === "down" && <p role="alert">请输入有效的下跌幅度。</p>}
+          {invalid === "turnover" && <p role="alert">请输入有效的成交额倍数。</p>}
           <div className={styles.monitorHelp}>
             <p><strong>时间窗口：</strong><span id="alert-window-help">填 30 就看最近 30 秒内的涨跌，并统计这 30 秒的成交额。</span></p>
             <p><strong>上涨幅度：</strong><span id="alert-up-help">勾选并填 5，窗口内涨幅达到 5% 就记一条异动。</span></p>

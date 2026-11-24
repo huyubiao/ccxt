@@ -427,9 +427,9 @@ is running. To run the saved rule independently of the web app, use
 Playground, keep the market page open for browser-based monitoring.
 Set the window in whole seconds (10 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
-Both thresholds have a minimum magnitude of 2%. Downward thresholds must
-be below 100%. Previously saved thresholds and windows outside these bounds
-are adjusted when the settings are read.
+Both thresholds range from 2% through 100%, inclusive. Previously saved
+thresholds and windows outside their bounds are adjusted when the settings
+are read.
 Each direction maintains its own rolling samples and alert levels.
 Changing the price thresholds or window restarts sampling. Existing signed
 threshold settings migrate to the corresponding direction.
@@ -444,8 +444,11 @@ expires, the monitor returns to looking for the start of a new series.
 
 Price triggers appear in **告警记录**. The first trigger in each series
 enters the turnover check queue. The configured window's Binance USDT
-turnover must reach the configured multiple (default 3×) of the baseline
+turnover must reach the configured multiple (2× through 100×, default 3×) of the baseline
 before any alert in that series is issued. Later levels share that check.
+Previously saved multiples outside this range are adjusted when read.
+The form sets out-of-range numeric thresholds and turnover multiples to the
+nearest limit when leaving the field or saving the settings.
 If the price advances while the check is pending, the highest level reached
 is reported when the check passes. The baseline
 is the median quote turnover of 60 complete one-minute candles before the

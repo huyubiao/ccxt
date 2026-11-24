@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  alertDayStart, forecastAlertDirection, getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds, parseAlertThreshold, parseTurnoverMultiple,
+  alertDayStart, clampAlertThreshold, clampTurnoverMultiple, forecastAlertDirection,
+  getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds,
   recordDirectionalPrice, recordPrice, recordPriceLevel,
-  restoreAlertSeconds, restoreAlertThreshold, settlePriceSeries,
+  restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceSeries,
 } from "./price-alerts.ts";
 
 const checkedVolume = { turnover: 390_000, baseline: 120_000, multiple: 3.25 };
@@ -95,10 +96,18 @@ test("an expired series cannot bypass the next series' turnover check", () => {
   assert.equal(settlePriceSeries(state, next.series, checkedVolume).level, 2);
 });
 
-test("turnover settings require a finite multiple greater than one", () => {
-  assert.equal(parseTurnoverMultiple("3"), 3);
-  assert.equal(parseTurnoverMultiple(" 1.25 "), 1.25);
-  for (const value of ["", "0", "1", "-2", "Infinity", "abc"]) assert.equal(parseTurnoverMultiple(value), null);
+test("turnover input clamps numeric values to 2 through 100 times", () => {
+  for (const value of ["0", "-2", "1.99", "2"]) assert.equal(clampTurnoverMultiple(value), 2);
+  assert.equal(clampTurnoverMultiple(" 2.25 "), 2.25);
+  for (const value of ["100", "100.01", "150"]) assert.equal(clampTurnoverMultiple(value), 100);
+  for (const value of ["", " ", "Infinity", "abc"]) assert.equal(clampTurnoverMultiple(value), null);
+});
+
+test("saved turnover settings are clamped to the current limits", () => {
+  assert.equal(restoreTurnoverMultiple("1.25"), 2);
+  assert.equal(restoreTurnoverMultiple("120"), 100);
+  assert.equal(restoreTurnoverMultiple("3.5"), 3.5);
+  assert.equal(restoreTurnoverMultiple(""), null);
 });
 
 test("turnover baseline scales the median of 60 complete minutes to the configured window", () => {
@@ -118,12 +127,18 @@ test("turnover multiples distinguish missing data from a measured zero", () => {
   assert.equal(getTurnoverMultiple({ turnover: 300, baseline: 0 }), null);
 });
 
-test("signed thresholds support percent input and reject invalid values", () => {
-  assert.equal(parseAlertThreshold("-50%"), -50);
-  assert.equal(parseAlertThreshold("+3.5"), 3.5);
-  assert.equal(parseAlertThreshold("2%"), 2);
-  assert.equal(parseAlertThreshold("-2%"), -2);
-  for (const value of ["", "0", "1.99", "-1.99", "-100", "Infinity", "abc"]) assert.equal(parseAlertThreshold(value), null);
+test("threshold inputs clamp by direction and support percent formatting", () => {
+  assert.equal(clampAlertThreshold("+3.5", "up"), 3.5);
+  assert.equal(clampAlertThreshold("-50%", "down"), -50);
+  assert.equal(clampAlertThreshold("50%", "down"), -50);
+  for (const direction of ["up", "down"]) {
+    const sign = direction === "up" ? 1 : -1;
+    for (const value of ["0", "1.99%", "2%"]) assert.equal(clampAlertThreshold(value, direction), sign * 2);
+    for (const value of ["100%", "100.01", "250"]) assert.equal(clampAlertThreshold(value, direction), sign * 100);
+    for (const value of ["", "%", "Infinity", "abc"]) assert.equal(clampAlertThreshold(value, direction), null);
+  }
+  assert.equal(clampAlertThreshold("-5", "up"), 2);
+  assert.equal(clampAlertThreshold("-120%", "down"), -100);
 });
 
 test("the default window uses samples up to exactly 30 seconds old", () => {
@@ -182,7 +197,8 @@ test("older settings are brought within the supported bounds", () => {
   assert.equal(restoreAlertThreshold("0.5%"), 2);
   assert.equal(restoreAlertThreshold("-0.5%"), -2);
   assert.equal(restoreAlertThreshold("-2.5%"), -2.5);
-  assert.equal(restoreAlertThreshold("-100%"), null);
+  assert.equal(restoreAlertThreshold("-100%"), -100);
+  assert.equal(restoreAlertThreshold("150%"), 100);
   assert.equal(restoreAlertSeconds("3600"), 300);
   assert.equal(restoreAlertSeconds("60"), 60);
   assert.equal(restoreAlertSeconds("5"), 10);

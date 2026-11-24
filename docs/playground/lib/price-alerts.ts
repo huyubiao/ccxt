@@ -2,7 +2,10 @@ export const DEFAULT_ALERT_SECONDS = 30;
 export const MIN_ALERT_SECONDS = 10;
 export const MAX_ALERT_SECONDS = 300;
 export const MIN_ALERT_PERCENT = 2;
+export const MAX_ALERT_PERCENT = 100;
 export const DEFAULT_TURNOVER_MULTIPLE = 3;
+export const MIN_TURNOVER_MULTIPLE = 2;
+export const MAX_TURNOVER_MULTIPLE = 100;
 export const TURNOVER_BASELINE_MINUTES = 60;
 export const ALERT_DAY_MS = 24 * 60 * 60 * 1000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -55,9 +58,22 @@ export function forecastAlertDirection({ price, change }: Pick<SpikeRecord, "pri
   return change > 0 ? "up" : "down";
 }
 
-export function parseTurnoverMultiple(value: string): number | null {
-  const multiple = Number(value);
-  return Number.isFinite(multiple) && multiple > 1 ? multiple : null;
+function readAlertNumber(value: string): number | null {
+  const number = Number(value);
+  return value.trim() && Number.isFinite(number) ? number : null;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function clampTurnoverMultiple(value: string): number | null {
+  const multiple = readAlertNumber(value);
+  return multiple === null ? null : clamp(multiple, MIN_TURNOVER_MULTIPLE, MAX_TURNOVER_MULTIPLE);
+}
+
+export function restoreTurnoverMultiple(value: string): number | null {
+  return Number(value) > 1 ? clampTurnoverMultiple(value) : null;
 }
 
 export function getTurnoverBaseline(minutes: (number | undefined)[], seconds: number): number | null {
@@ -77,18 +93,20 @@ export function getTurnoverMultiple({ turnover, baseline }: AlertTurnover): numb
 }
 
 function readSignedThreshold(value: string): number | null {
-  const threshold = Number(value.trim().replace(/%$/, ""));
-  return Number.isFinite(threshold) && threshold > -100 && threshold !== 0 ? threshold : null;
+  return readAlertNumber(value.trim().replace(/%$/, ""));
 }
 
-export function parseAlertThreshold(value: string): number | null {
+export function clampAlertThreshold(value: string, direction: keyof DirectionalThresholds): number | null {
   const threshold = readSignedThreshold(value);
-  return threshold !== null && Math.abs(threshold) >= MIN_ALERT_PERCENT ? threshold : null;
+  if (threshold === null) return null;
+  return direction === "up" ? clamp(threshold, MIN_ALERT_PERCENT, MAX_ALERT_PERCENT)
+    : -clamp(Math.abs(threshold), MIN_ALERT_PERCENT, MAX_ALERT_PERCENT);
 }
 
 export function restoreAlertThreshold(value: string): number | null {
   const threshold = readSignedThreshold(value);
-  return threshold === null ? null : Math.sign(threshold) * Math.max(Math.abs(threshold), MIN_ALERT_PERCENT);
+  return threshold === null || threshold === 0 ? null
+    : Math.sign(threshold) * clamp(Math.abs(threshold), MIN_ALERT_PERCENT, MAX_ALERT_PERCENT);
 }
 
 export function parseAlertSeconds(value: string): number | null {
