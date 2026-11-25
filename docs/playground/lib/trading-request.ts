@@ -1,9 +1,8 @@
 import { isLocalSettingsRequest, isSameOrigin, readLocalJson } from "./local-settings-request";
-import { proxyMarketRequest } from "./market-service-proxy";
+import { proxyMarketRequest, type TradingRoute } from "./market-service-proxy";
 
 /** Trading mutations require local settings mode, same origin and JSON. */
-export async function forwardTradingMutation(request: Request,
-  route: "/api/trading" | "/api/trading/account" | "/api/trading/test-order" | "/api/trading/close") {
+export async function forwardTradingMutation(request: Request, route: TradingRoute) {
   if (!isLocalSettingsRequest(request) || !isSameOrigin(request)) {
     return Response.json({ error: "交易操作仅可在本机发起。" }, { status: 403 });
   }

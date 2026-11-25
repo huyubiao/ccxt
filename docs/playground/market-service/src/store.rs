@@ -1,16 +1,19 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
+use tokio::task::JoinHandle;
 
-use crate::strategy::{Rule, MARKET_SPIKE_NAME};
+use crate::now_ms;
+use crate::strategy::{Rule, MARKET_SPIKE_ID as STRATEGY, MARKET_SPIKE_NAME};
 
 const ACTIVE: &str = "json_extract(watch, '$.status') IN ('starting', 'watching')";
 const VISIBLE: &str = "json_extract(watch, '$.deleted') IS NULL";
-const STRATEGY: &str = "market-spike";
 const LEASE_MS: i64 = 15_000;
 const RETENTION_MS: i64 = 30 * 86_400_000;
+const TRADE_OPERATION_MS: i64 = 60_000;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -41,6 +44,22 @@ pub fn write_private_json(path: &Path, data: &impl serde::Serialize) -> Result<(
 }
 
 pub struct Store(Mutex<Connection>, PathBuf);
+
+pub struct TradeOperation {
+    store: Arc<Store>,
+    trade_id: String,
+    owner: String,
+    renewal: JoinHandle<()>,
+}
+
+impl Drop for TradeOperation {
+    fn drop(&mut self) {
+        self.renewal.abort();
+        if let Ok(db) = self.store.db() {
+            let _ = db.execute("DELETE FROM trade_operation WHERE tradeId = ? AND owner = ?", [&self.trade_id, &self.owner]);
+        }
+    }
+}
 
 pub struct Delivery {
     pub id: String,
@@ -119,6 +138,9 @@ impl Store {
     pub fn save_rule(&self, rule: Rule) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if read_rule(&tx)? != Some(rule) {
+            Self::interrupt_pending_evaluations(&tx)?;
+        }
         tx.execute("INSERT INTO monitor_rule VALUES (1, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [serde_json::to_string(&rule)?])?;
         if !rule.enabled {
             tx.execute("INSERT INTO auto_order_strategy_stop VALUES (?, 1) ON CONFLICT(strategyId) DO UPDATE SET version = version + 1", [STRATEGY])?;
@@ -129,6 +151,24 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn disable_auto_trade(&self) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute("UPDATE monitor_rule SET value = json_set(value, '$.continuation.autoTrade', json('false'))
+            WHERE key = 1 AND json_extract(value, '$.continuation.autoTrade') = 1", [])?;
+        if changed > 0 {
+            Self::interrupt_pending_evaluations(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn interrupt_pending_evaluations(db: &Connection) -> Result<()> {
+        db.execute("UPDATE monitor_alert SET event = json_set(event, '$.continuation.status', 'interrupted')
+            WHERE json_extract(event, '$.continuation.status') = 'pending'", [])?;
         Ok(())
     }
 
@@ -310,6 +350,42 @@ impl Store {
         Ok(())
     }
 
+    pub fn allow_spike_order(
+        &self, id: &str, owner: &str, rule: Rule, now: i64, claim: Option<&Value>,
+    ) -> Result<bool> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !rule.enabled || !rule.continuation.auto_trade || read_rule(&tx)? != Some(rule) {
+            return Ok(false);
+        }
+        let allowed: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM monitor_alert WHERE id = ?
+            AND json_extract(event, '$.continuation.status') = 'pending'
+            AND EXISTS (SELECT 1 FROM monitor_worker WHERE key = 1 AND owner = ? AND heartbeat > ?))",
+            params![id, owner, now - LEASE_MS], |row| row.get(0))?;
+        if let Some(result) = claim.filter(|_| allowed) {
+            tx.execute("UPDATE monitor_alert SET event = json_set(event, '$.continuation', json(?)) WHERE id = ?",
+                params![result.to_string(), id])?;
+        }
+        tx.commit()?;
+        Ok(allowed)
+    }
+
+    pub fn finish_spike_evaluation(&self, id: &str, result: &Value) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event = json_set(event, '$.continuation', json(?))
+            WHERE id = ? AND json_extract(event, '$.continuation.status') IN ('pending', 'submitting')",
+            params![result.to_string(), id])?;
+        Ok(())
+    }
+
+    pub fn interrupt_spike_evaluations(&self, owner: &str, recover_submitting: bool) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event = json_set(event, '$.continuation.status',
+            CASE json_extract(event, '$.continuation.status') WHEN 'submitting' THEN 'unknown' ELSE 'interrupted' END)
+            WHERE (json_extract(event, '$.continuation.status') = 'pending'
+                OR (? AND json_extract(event, '$.continuation.status') = 'submitting'))
+            AND EXISTS (SELECT 1 FROM monitor_worker WHERE key = 1 AND owner = ?)", params![recover_submitting, owner])?;
+        Ok(())
+    }
+
     pub fn claim_delivery(&self, now: i64) -> Result<Option<Delivery>> {
         let db = self.db()?;
         db.execute("UPDATE monitor_alert SET delivery='unknown',lastResult='unknown' WHERE delivery='sending' AND lastAttempt<=?", [now - 60_000])?;
@@ -338,11 +414,53 @@ impl Store {
 
     /// Inserts or replaces one trade managed by the execution engine.
     pub fn save_trade(&self, trade: &Value) -> Result<()> {
+        Self::write_trade(&*self.db()?, trade)
+    }
+
+    /// Serializes exchange changes even when the standalone monitor and web app share a database.
+    pub fn begin_trade_operation(self: &Arc<Self>, trade_id: &str) -> Result<Option<TradeOperation>> {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let acquired = self.db()?.execute("INSERT INTO trade_operation VALUES (?, ?, ?)
+            ON CONFLICT(tradeId) DO UPDATE SET owner = excluded.owner, expiresAt = excluded.expiresAt
+            WHERE trade_operation.expiresAt <= ?", params![trade_id, owner, now + TRADE_OPERATION_MS, now])? == 1;
+        if !acquired {
+            return Ok(None);
+        }
+        let renewal = {
+            let store = Arc::downgrade(self);
+            let trade_id = trade_id.to_owned();
+            let owner = owner.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    let Some(store) = store.upgrade() else { break; };
+                    let updated = store.db().and_then(|db| Ok(db.execute(
+                        "UPDATE trade_operation SET expiresAt = ? WHERE tradeId = ? AND owner = ?",
+                        params![now_ms() + TRADE_OPERATION_MS, trade_id, owner],
+                    )?));
+                    if matches!(updated, Ok(0)) { break; }
+                }
+            })
+        };
+        Ok(Some(TradeOperation { store: Arc::clone(self), trade_id: trade_id.to_owned(), owner, renewal }))
+    }
+
+    pub fn reserve_trade(&self, trade: &Value, check: impl FnOnce(&[Value]) -> Result<()>) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check(&Self::read_active_trades(&tx)?)?;
+        Self::write_trade(&tx, trade)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_trade(db: &Connection, trade: &Value) -> Result<()> {
         let id = trade["id"].as_str().ok_or("trade id missing")?;
         let symbol = trade["symbol"].as_str().ok_or("trade symbol missing")?;
         let status = trade["status"].as_str().ok_or("trade status missing")?;
         let opened_at = trade["openedAt"].as_i64().ok_or("trade time missing")?;
-        self.db()?.execute(
+        db.execute(
             "INSERT INTO trade VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
                 symbol = excluded.symbol, status = excluded.status, data = excluded.data",
             params![id, symbol, status, opened_at, serde_json::to_string(trade)?],
@@ -352,8 +470,12 @@ impl Store {
 
     /// Trades whose position may still exist on the exchange.
     pub fn active_trades(&self) -> Result<Vec<Value>> {
+        Self::read_active_trades(&*self.db()?)
+    }
+
+    fn read_active_trades(db: &Connection) -> Result<Vec<Value>> {
         query_json(
-            &*self.db()?,
+            db,
             "SELECT data FROM trade WHERE status IN ('opening', 'open', 'closing') ORDER BY openedAt",
             [],
         )
@@ -381,8 +503,9 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let blocked: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM trade WHERE id IN (SELECT value FROM json_each(?))
-                AND status NOT IN ('closed', 'failed'))",
-            [&ids],
+                AND (status NOT IN ('closed', 'failed') OR EXISTS (
+                    SELECT 1 FROM trade_operation WHERE tradeId = trade.id AND expiresAt > ?)))",
+            params![ids, now_ms()],
             |row| row.get(0),
         )?;
         if blocked {
@@ -413,6 +536,7 @@ impl Store {
         )?;
         db.execute("DELETE FROM auto_order_request WHERE time < ?", [cutoff])?;
         db.execute("DELETE FROM auto_order_signal WHERE NOT EXISTS (SELECT 1 FROM monitor_alert WHERE id=auto_order_signal.id)", [])?;
+        db.execute("DELETE FROM trade_operation WHERE expiresAt <= ?", [now])?;
         Ok(())
     }
 }
@@ -486,6 +610,77 @@ mod tests {
         rule.turnover_multiple = 120.0;
         store.save_rule(rule).unwrap();
         assert_eq!(store.rule().unwrap().turnover_multiple, 100.0);
+    }
+
+    #[test]
+    fn old_rule_json_keeps_its_directions_and_auto_trade_starts_off() {
+        let old: Rule = serde_json::from_value(json!({
+            "enabled":true,"notify":false,"up":null,"down":-5,"seconds":30,"turnoverMultiple":3
+        })).unwrap();
+        assert_eq!(old.up, None);
+        assert!(old.is_valid());
+        assert!(!old.continuation.auto_trade);
+        assert_eq!(old.continuation.lookback_hours, 24);
+        assert_eq!(old.continuation.max_range_percent, 5.0);
+        assert_eq!(old.continuation.turnover_multiple, 5.0);
+        assert_eq!(old.continuation.stop_loss_percent, 1.0);
+        assert_eq!(old.continuation.take_profit_percent, 1.0);
+    }
+
+    #[test]
+    fn a_rejected_reservation_does_not_create_an_opening_trade() {
+        let store = Store::open_memory().unwrap();
+        let first = json!({"id":"first","symbol":"BTCUSDT","status":"opening","openedAt":1});
+        store.reserve_trade(&first, |active| {
+            assert!(active.is_empty());
+            Ok(())
+        }).unwrap();
+        let second = json!({"id":"second","symbol":"BTCUSDT","status":"opening","openedAt":2});
+        assert!(store.reserve_trade(&second, |active| {
+            assert_eq!(active, &[first]);
+            Err("already opening".into())
+        }).is_err());
+        assert!(store.trade("second").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_operation_lease_prevents_another_connection_from_changing_or_deleting_the_trade() {
+        let path = std::env::temp_dir().join(format!("playground-lease-{}.sqlite", uuid::Uuid::new_v4()));
+        let first = Arc::new(Store::open(&path).unwrap());
+        let second = Arc::new(Store::open(&path).unwrap());
+        first.save_trade(&json!({"id":"first","symbol":"BTCUSDT","status":"closed","openedAt":1})).unwrap();
+        let lease = first.begin_trade_operation("first").unwrap().unwrap();
+        assert!(second.begin_trade_operation("first").unwrap().is_none());
+        assert!(!second.delete_finished_trades(&["first".into()]).unwrap());
+        drop(lease);
+        assert!(second.begin_trade_operation("first").unwrap().is_some());
+        assert!(second.delete_finished_trades(&["first".into()]).unwrap());
+        drop(first);
+        drop(second);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_signal_can_be_claimed_once_and_disarming_interrupts_unclaimed_signals() {
+        let store = Store::open_memory().unwrap();
+        let mut rule = Rule { enabled: true, ..Rule::default() };
+        rule.continuation.auto_trade = true;
+        store.save_rule(rule).unwrap();
+        store.heartbeat("owner", "connected", 5_000).unwrap();
+        let pending = json!({"symbol":"BTCUSDT","time":5000,"threshold":5,"change":5,"continuation":{"status":"pending"}});
+        assert!(store.confirm("first", &pending, rule, "owner", 0, 5_000).unwrap());
+        let submitting = json!({"status":"submitting","score": {"total":80}});
+        assert!(!store.allow_spike_order("first", "other", rule, 5_000, Some(&submitting)).unwrap());
+        assert!(store.allow_spike_order("first", "owner", rule, 5_000, Some(&submitting)).unwrap());
+        assert!(!store.allow_spike_order("first", "owner", rule, 5_000, Some(&submitting)).unwrap());
+        assert!(store.confirm("second", &pending, rule, "owner", 0, 5_000).unwrap());
+        store.disable_auto_trade().unwrap();
+        store.save_rule(rule).unwrap();
+        assert!(!store.allow_spike_order("second", "owner", rule, 5_000, Some(&submitting)).unwrap());
+        store.interrupt_spike_evaluations("owner", true).unwrap();
+        let status = store.status(5_000).unwrap();
+        assert_eq!(status["records"][0]["event"]["continuation"]["status"], "interrupted");
+        assert_eq!(status["records"][1]["event"]["continuation"]["status"], "unknown");
     }
 
     #[test]

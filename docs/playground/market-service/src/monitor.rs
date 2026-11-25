@@ -17,14 +17,17 @@ use uuid::Uuid;
 use crate::binance::{number, outbound_proxy, Binance, Contract, VOLUME_DELAY_MS};
 use crate::notifications::{format_event, Notifier};
 use crate::now_ms;
+use crate::spike_trade::{Evaluation, Evaluator};
 use crate::store::{Delivery, Result, Store};
 use crate::strategy::{
     Detection, Move, PendingCheck, PriceWindow, Rule, Sample, Volume, MARKET_SPIKE_NAME,
 };
+use crate::trading::Side;
 
 const CHECK_LIMIT: usize = 100;
 const CHECK_CONCURRENCY: usize = 2;
 const MAX_QUEUE_AGE: i64 = 15_000;
+const MAX_EVALUATIONS: usize = 16;
 const MAX_WATCHES: usize = 20;
 const WATCH_DURATION: i64 = 3_600_000;
 type SharedWindow = Arc<Mutex<PriceWindow>>;
@@ -86,12 +89,15 @@ struct Monitor {
     watches: HashMap<String, Watch>,
     contexts: JoinSet<(String, Value)>,
     context_queue: VecDeque<(String, String, i64)>,
+    evaluator: Arc<Evaluator>,
+    evaluations: JoinSet<Result<()>>,
 }
 
 pub async fn supervise(
     store: Arc<Store>,
     binance: Arc<Binance>,
     notifier: Arc<Notifier>,
+    evaluator: Arc<Evaluator>,
     mut stop: watch::Receiver<bool>,
 ) {
     while !*stop.borrow() {
@@ -108,6 +114,8 @@ pub async fn supervise(
             watches: HashMap::new(),
             contexts: JoinSet::new(),
             context_queue: VecDeque::new(),
+            evaluator: Arc::clone(&evaluator),
+            evaluations: JoinSet::new(),
         };
         if let Err(error) = monitor.run(&mut stop).await {
             eprintln!("Market monitor stopped: {error}");
@@ -131,15 +139,21 @@ impl Monitor {
         let result = async {
             self.store.reset_watches(&self.owner)?;
             self.store.interrupt_spikes(&self.owner)?;
+            self.store.interrupt_spike_evaluations(&self.owner, true)?;
             self.event_loop(stop).await
         }
         .await;
+        let interrupted = self.store.interrupt_spike_evaluations(&self.owner, false);
+        while let Some(job) = self.evaluations.join_next().await {
+            report_evaluation(job);
+        }
         let cleanup = (|| {
             self.store.interrupt_spikes(&self.owner)?;
+            self.store.interrupt_spike_evaluations(&self.owner, true)?;
             self.store.reset_watches(&self.owner)?;
             self.store.release(&self.owner)
         })();
-        result.and(cleanup)
+        result.and(interrupted).and(cleanup)
     }
 
     async fn event_loop(&mut self, stop: &mut watch::Receiver<bool>) -> Result<()> {
@@ -237,6 +251,9 @@ impl Monitor {
                 task = self.contexts.join_next(), if !self.contexts.is_empty() => {
                     if let Some(Ok((id, context))) = task { self.store.save_context(&id, &context)?; }
                 }
+                task = self.evaluations.join_next(), if !self.evaluations.is_empty() => {
+                    if let Some(job) = task { report_evaluation(job); }
+                }
                 delivery = deliveries.join_next(), if !deliveries.is_empty() => {
                     if let Some(Ok((job, status))) = delivery { self.store.finish_delivery(&job, status, now_ms())?; }
                 }
@@ -312,7 +329,7 @@ impl Monitor {
                     }
                 }
                 Some(Detection::Confirmed(next, volume)) => {
-                    self.confirm(&contract.id, next, threshold, volume, Some(sample), None)?
+                    self.confirm(contract, next, threshold, volume, Some(sample), None, None)?
                 }
                 None => {}
             }
@@ -374,12 +391,13 @@ impl Monitor {
                 )?;
             }
             self.confirm(
-                symbol,
+                &check.contract,
                 movement,
                 check.threshold,
                 confirmed_volume,
                 latest,
                 if upgraded { None } else { required },
+                Some(check.first.sample.time),
             )?;
         } else {
             let status = if timely && multiple.is_some() {
@@ -424,13 +442,15 @@ impl Monitor {
 
     fn confirm(
         &mut self,
-        symbol: &str,
+        contract: &Contract,
         movement: Move,
         threshold: f64,
         volume: Volume,
         latest: Option<Sample>,
         required: Option<f64>,
+        series_trigger_time: Option<i64>,
     ) -> Result<()> {
+        let symbol = &contract.id;
         let mut event = self.event(symbol, movement, threshold);
         let time = movement.sample.time;
         let id = format!(
@@ -440,6 +460,11 @@ impl Monitor {
         event["kind"] = json!("market-spike");
         event["forecastDirection"] = json!(movement.forecast(latest));
         event["volume"] = json!(volume);
+        let evaluate = series_trigger_time.zip(volume.multiple);
+        let can_queue = self.evaluations.len() < MAX_EVALUATIONS;
+        if evaluate.is_some() {
+            event["continuation"] = json!({"status":if can_queue { "pending" } else { "queue-skipped" }});
+        }
         if self
             .store
             .confirm(&id, &event, self.rule, &self.owner, self.version, now_ms())?
@@ -452,6 +477,15 @@ impl Monitor {
                 required,
                 Some(volume),
             )?;
+            if let Some((trigger_time, turnover)) = evaluate.filter(|_| can_queue) {
+                let evaluator = Arc::clone(&self.evaluator);
+                let evaluation = Evaluation {
+                    id: id.clone(), contract: contract.clone(), trigger_time, turnover,
+                    side: if threshold > 0.0 { Side::Long } else { Side::Short },
+                    rule: self.rule, owner: self.owner.clone(),
+                };
+                self.evaluations.spawn(async move { evaluator.evaluate(evaluation).await });
+            }
             self.start_watch(symbol, time)?;
             self.store.finish_signal(&id, &self.owner)?;
             if self.context_queue.len() < CHECK_LIMIT {
@@ -543,6 +577,14 @@ impl Monitor {
             }
         }
         Ok(())
+    }
+}
+
+fn report_evaluation(job: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match job {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("Market spike evaluation failed: {error}"),
+        Err(error) => eprintln!("Market spike evaluation worker failed: {error}"),
     }
 }
 

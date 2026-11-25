@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useId, useState } from "react";
-import { isTradeActive, STANDARD_TAKER_FEE_RATE, tradeExecution, tradingModeLabels, type Trade, type TradeOrder, type TradingMode } from "@/lib/trading-types";
+import { Fragment, useId, useState, type FormEvent } from "react";
+import { isTradeActive, STANDARD_TAKER_FEE_RATE, tradeExecution, tradingModeLabels, type PositionAction, type PositionRequest,
+  type Trade, type TradeOrder, type TradingMode } from "@/lib/trading-types";
 import { marketNumberFormatter } from "@/lib/market-number";
 import { useRecordSelection } from "./use-record-selection";
 import styles from "./markets.module.css";
@@ -18,7 +19,7 @@ const statusLabels: Record<Trade["status"], string> = {
   opening: "开仓中", open: "持仓中", closing: "平仓中", closed: "已平仓", failed: "失败",
 };
 const orderLabels: Record<TradeOrder["kind"], string> = {
-  entry: "开仓", "stop-loss": "止损", "take-profit": "止盈", exit: "平仓",
+  entry: "开仓", "stop-loss": "止损", "take-profit": "止盈", exit: "平仓", "limit-exit": "限价平仓",
 };
 const orderStatusLabels: Record<TradeOrder["status"], string> = {
   placed: "已挂单", filled: "已成交", canceled: "已撤销", triggered: "已触发", failed: "失败",
@@ -36,6 +37,7 @@ function TradeDetails({ trade, execution }: { trade: Trade; execution: ReturnTyp
         <div><dt>策略</dt><dd>{trade.strategy.name}</dd></div>
         <div><dt>数量 / 金额 (USDT)</dt><dd>{trade.amount} / {formatPrice(trade.notional)}</dd></div>
         <div><dt>止损 / 止盈触发价</dt><dd>{formatPrice(trade.stopLoss ?? undefined)} / {formatPrice(trade.takeProfit ?? undefined)}</dd></div>
+        {trade.pendingLimitExitPercent != null && <div><dt>自动出场</dt><dd>正在核对并挂单，后台会自动处理</dd></div>}
         <div><dt>开仓手续费 (USDT)</dt><dd>{entryFee === null ? "—" : formatFee.format(entryFee)}</dd></div>
         <div><dt>平仓手续费 (USDT)</dt><dd>{exitFee === null ? "—" : formatFee.format(exitFee)}</dd></div>
         {isTradeActive(trade) && <div><dt>到期时间</dt><dd>{formatTime.format(trade.deadline)}</dd></div>}
@@ -51,7 +53,9 @@ function TradeDetails({ trade, execution }: { trade: Trade; execution: ReturnTyp
             {trade.orders.map((order, index) => <li key={index}>
               {orderLabels[order.kind]} {order.side === "buy" ? "买" : "卖"}
               {order.triggerPrice !== null ? ` 触发价 ${formatPrice(order.triggerPrice)}` : ""}
-              {order.execution ? ` 成交均价 ${formatPrice(order.execution.quote / order.execution.filled)}` : ""} · {orderStatusLabels[order.status]}
+              {order.limitPrice != null ? ` 限价 ${formatPrice(order.limitPrice)}` : ""}
+              {order.execution ? ` 成交均价 ${formatPrice(order.execution.quote / order.execution.filled)}` : ""} · {
+                order.kind === "limit-exit" && order.status === "placed" && order.execution ? "部分成交" : orderStatusLabels[order.status]}
               {order.exchangeId && <> · 订单号 {order.exchangeId}</>}
               {order.error && <> · {order.error}</>}
             </li>)}
@@ -62,14 +66,86 @@ function TradeDetails({ trade, execution }: { trade: Trade; execution: ReturnTyp
   );
 }
 
-export default function TradeRecords({ trades, activeMode, canDelete, onDelete, onClose }: {
+export function PositionControls({ trade, disabled, onManage }: {
+  trade: Trade;
+  disabled: boolean;
+  onManage: (action: PositionAction) => Promise<unknown>;
+}) {
+  const [feedback, setFeedback] = useState<{ error: boolean; text: string } | null>(null);
+  const order = trade.orders.findLast((order) => order.kind === "limit-exit" && order.status === "placed");
+  const label = trade.side === "long" ? "限价平多" : "限价平空";
+
+  async function manage(action: PositionAction, success: string, form?: HTMLFormElement) {
+    setFeedback(null);
+    try {
+      await onManage(action);
+      setFeedback({ error: false, text: success });
+      form?.reset();
+    } catch (caught) {
+      setFeedback({ error: true, text: caught instanceof Error ? caught.message : "持仓操作失败。" });
+    }
+  }
+
+  function submitLimit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const price = Number(new FormData(form).get("price"));
+    if (!Number.isFinite(price) || price <= 0) {
+      setFeedback({ error: true, text: "请输入大于 0 的平仓限价。" });
+      return;
+    }
+    if (!window.confirm(`确认以限价 ${price} USDT 对 ${trade.symbol} 提交${label}单（${tradingModeLabels[trade.mode]}）？`)) return;
+    void manage({ action: "limit-close", price }, "已提交限价平仓单，请查看订单明细。", form);
+  }
+
+  function submitProtection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    const stop = fields.get("stopLossPrice");
+    const take = fields.get("takeProfitPrice");
+    const stopLossPrice = stop ? Number(stop) : undefined;
+    const takeProfitPrice = take ? Number(take) : undefined;
+    if ((stopLossPrice === undefined && takeProfitPrice === undefined) ||
+        [stopLossPrice, takeProfitPrice].some((price) => price !== undefined && (!Number.isFinite(price) || price <= 0))) {
+      setFeedback({ error: true, text: "请至少输入一个大于 0 的触发价。" });
+      return;
+    }
+    void manage({ action: "set-protection", stopLossPrice, takeProfitPrice }, "币安保护单已更新。", form);
+  }
+
+  return <section className={styles.tradePositionControls} aria-label={`${trade.symbol} 持仓管理`}>
+    {order ? <div className={styles.tradeActions}>
+      <span>{label} {formatPrice(order.limitPrice ?? undefined)} USDT · {order.execution ? `已成交 ${order.execution.filled} / ` : ""}{order.amount}</span>
+      <button type="button" disabled={disabled} onClick={() => void manage({ action: "cancel-limit-close" }, "已核对限价单终态，请查看订单明细。")}>撤销限价平仓单</button>
+    </div> : <form className={styles.monitorForm} onSubmit={submitLimit}>
+      <label>平仓限价（USDT） <input name="price" type="number" min={0} step="any" required disabled={disabled} /></label>
+      <button type="submit" disabled={disabled}>{label}</button>
+    </form>}
+    <form className={styles.monitorForm} onSubmit={submitProtection}>
+      <label>止损触发价 <input name="stopLossPrice" type="number" min={0} step="any" disabled={disabled}
+        placeholder={trade.stopLoss?.toString()} /></label>
+      <label>止盈触发价 <input name="takeProfitPrice" type="number" min={0} step="any" disabled={disabled}
+        placeholder={trade.takeProfit?.toString()} /></label>
+      <button type="submit" disabled={disabled}>设置止损止盈</button>
+    </form>
+    <small>限价单针对当前剩余仓位。持仓到期时，系统撤销未完成的限价单并市价平仓。</small>
+    <small>止损和止盈按标记价触发，平掉对应方向的剩余仓位。只填写要修改的触发价，单位为 USDT。</small>
+    {feedback && <div role={feedback.error ? "alert" : "status"}>{feedback.text}</div>}
+  </section>;
+}
+
+export default function TradeRecords({ trades, activeMode, accountRevision, canDelete, onDelete, onClose, onManage }: {
   trades: readonly Trade[];
   activeMode: TradingMode;
+  accountRevision?: string;
   canDelete: boolean;
   onDelete: (ids: readonly string[]) => Promise<void>;
   onClose: (tradeId: string) => Promise<unknown>;
+  onManage: (request: PositionRequest) => Promise<unknown>;
 }) {
   const [closing, setClosing] = useState<string | null>(null);
+  const [managing, setManaging] = useState(false);
   const [closeError, setCloseError] = useState("");
   const [symbol, setSymbol] = useState("");
   const [status, setStatus] = useState<keyof typeof statusFilters>("all");
@@ -89,7 +165,7 @@ export default function TradeRecords({ trades, activeMode, canDelete, onDelete, 
   const start = (currentPage - 1) * PAGE_SIZE;
   const visible = filtered.slice(start, start + PAGE_SIZE);
   const removable = filtered.filter(canRemoveTrade);
-  const canSelect = canDelete && closing === null;
+  const canSelect = canDelete && closing === null && !managing;
   const { selected, count, deleting, error, deletedCount, allSelected, partlySelected, select, selectAll, deleteSelected } =
     useRecordSelection(removable, (trade) => trade.id, {
       label: "下单记录", canDelete: canSelect,
@@ -113,6 +189,16 @@ export default function TradeRecords({ trades, activeMode, canDelete, onDelete, 
       setCloseError(caught instanceof Error ? caught.message : "平仓失败。");
     } finally {
       setClosing(null);
+    }
+  }
+
+  async function manage(tradeId: string, action: PositionAction) {
+    if (!accountRevision) throw new Error("请重新读取币安账号状态。");
+    setManaging(true);
+    try {
+      return await onManage({ ...action, tradeId, accountRevision });
+    } finally {
+      setManaging(false);
     }
   }
 
@@ -180,6 +266,8 @@ export default function TradeRecords({ trades, activeMode, canDelete, onDelete, 
                 const fee = entryFee === null && exitFee === null ? null : (entryFee ?? 0) + (exitFee ?? 0);
                 const canRemove = canRemoveTrade(trade);
                 const isExpanded = expanded === trade.id;
+                const manageable = trade.status === "open" && activeMode === trade.mode && !!accountRevision && trade.pendingLimitExitPercent == null;
+                const confirmingEntry = trade.status === "opening" && trade.pendingLimitExitPercent != null;
                 return <Fragment key={trade.id}>
                   <tr className={styles.tradeRow}>
                     <td>
@@ -212,16 +300,18 @@ export default function TradeRecords({ trades, activeMode, canDelete, onDelete, 
                       <div className={styles.tradeActions}>
                         <button type="button" aria-expanded={isExpanded} aria-controls={isExpanded ? detailId : undefined}
                           onClick={() => setExpanded(isExpanded ? null : trade.id)}>
-                          {isExpanded ? "收起" : "详情"}
+                          {isExpanded ? "收起" : manageable ? "管理持仓" : "详情"}
                         </button>
                         {isTradeActive(trade) && <button type="button" className={styles.tradingClose}
-                          disabled={deleting || closing !== null || activeMode !== trade.mode} onClick={() => void close(trade)}>
+                          disabled={deleting || closing !== null || managing || confirmingEntry || activeMode !== trade.mode} onClick={() => void close(trade)}>
                           {closing === trade.id ? "平仓中…" : "市价平仓"}
                         </button>}
                       </div>
                     </td>
                   </tr>
                   {isExpanded && <tr><td id={detailId} colSpan={COLUMN_COUNT} className={styles.tradeDetailCell}>
+                    {manageable && <PositionControls trade={trade} disabled={deleting || closing !== null || managing}
+                      onManage={(action) => manage(trade.id, action)} />}
                     <TradeDetails trade={trade} execution={execution} />
                   </td></tr>}
                 </Fragment>;

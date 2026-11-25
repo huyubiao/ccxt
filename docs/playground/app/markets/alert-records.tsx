@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SPIKE_RECORD_LIMIT, spikeStatusLabels, type AlertHistoryRow } from "@/lib/alert-history";
 import { apiUrl } from "@/lib/basePath";
+import type { ContinuationResult } from "@/lib/background-monitor-types";
 import { formatAlertTurnover, formatMarketAmount, formatMarketPriceRange, marketNumberFormatter } from "@/lib/market-number";
 import { alertDayStart, spikeKey, type SpikeIdentity } from "@/lib/price-alerts";
 import { useRecordSelection } from "./use-record-selection";
@@ -10,6 +11,29 @@ const formatTime = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai",
 const formatPrice = marketNumberFormatter({ maximumSignificantDigits: 12 });
 const formatChange = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "exceptZero" });
 const formatThreshold = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
+const formatScorePercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const continuationLabels: Record<ContinuationResult["status"], string> = {
+  pending: "待评分", submitting: "正在下单", ordered: "已开仓", "below-score": "未达下单分数",
+  disabled: "已达标，自动下单关闭", "no-account": "已达标，未连接交易账号", unavailable: "历史行情不足或获取失败",
+  "queue-skipped": "评分队列已满", interrupted: "评估已中断或过期", unknown: "下单结果待核对", failed: "未完成下单",
+};
+const sideLabels = { long: "多头", short: "空头" };
+
+function ContinuationCell({ result }: { result?: ContinuationResult }) {
+  if (!result) return "—";
+  const label = continuationLabels[result.status];
+  const { score, side, target, error } = result;
+  if (!score) return label;
+  return <details className={styles.alertContinuation}>
+    <summary>{score.total} 分 · {side === "long" ? "做多" : "做空"} · {label}</summary>
+    <div>涨跌幅 {score.pricePoints}/60{score.rangePercent !== null && `（振幅 ${formatScorePercent.format(score.rangePercent)}%）`}</div>
+    <div>成交额 {score.turnoverPoints}/30</div>
+    <div>强平 {score.liquidationPoints}/10{score.nearSharePercent === null ? "（缺少估算）" :
+      `（${score.dominantSide ? `${sideLabels[score.dominantSide]}占优` : "多空持平"}，同向近价占比 ${formatScorePercent.format(score.nearSharePercent)}%）`}</div>
+    <div>下单门槛 {target} 分</div>
+    {error && <div>{error}</div>}
+  </details>;
+}
 
 function dayKey({ symbol, time }: AlertHistoryRow) {
   return JSON.stringify([alertDayStart(time), symbol]);
@@ -95,11 +119,11 @@ export default function AlertRecords({ records, canDelete, onDelete }: {
             <th scope="col">参考价/触发价 (USDT)</th>
             <th scope="col" title="按北京时间当日开盘价到触发价计算">当日涨跌幅度</th>
             <th scope="col">窗口涨跌幅/阈值</th><th scope="col">窗口 (秒)</th>
-            <th scope="col">成交额 (USDT)</th><th scope="col">核验结果</th>
+            <th scope="col">成交额 (USDT)</th><th scope="col">核验结果</th><th scope="col">延续评分与下单</th>
           </tr></thead>
           <tbody>
             {records.length === 0 && (
-              <tr><td colSpan={10} className={styles.emptyTableCell}><span role="status">暂无告警记录。</span></td></tr>
+              <tr><td colSpan={11} className={styles.emptyTableCell}><span role="status">暂无告警记录。</span></td></tr>
             )}
             {records.map((row) => {
               const key = spikeKey(row);
@@ -127,6 +151,7 @@ export default function AlertRecords({ records, canDelete, onDelete }: {
                 <td title={row.requiredMultiple === null ? undefined : `成交额门槛 ${row.requiredMultiple} 倍`}>
                   {spikeStatusLabels[row.status]}
                 </td>
+                <td><ContinuationCell result={row.continuation} /></td>
               </tr>;
             })}
           </tbody>

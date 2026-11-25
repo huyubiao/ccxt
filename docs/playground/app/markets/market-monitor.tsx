@@ -14,7 +14,8 @@ import {
 } from "@/lib/price-alerts";
 import { createMarketSpikeEvent } from "@/lib/strategy-notification-events";
 import { useBackgroundMonitor } from "./use-background-monitor";
-import type { BackgroundRule } from "@/lib/background-monitor-types";
+import { defaultContinuationRule, type BackgroundRule } from "@/lib/background-monitor-types";
+import { tradingModeLabels } from "@/lib/trading-types";
 import AlertRecords from "./alert-records";
 import { useStrategyNotifications } from "./use-strategy-notifications";
 import DingTalkSettings from "./dingtalk-settings";
@@ -33,7 +34,7 @@ const DIRECTION_STORAGE_KEY = "ccxt-market-alert-directions";
 const TURNOVER_STORAGE_KEY = "ccxt-market-alert-turnover-multiple";
 const QUEUE_LIMIT = 100;
 const TURNOVER_CONCURRENCY = 2;
-const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: null, down: -5 };
+const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: 5, down: -5 };
 const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4, signDisplay: "exceptZero" });
 
 type TurnoverJob = {
@@ -58,13 +59,18 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [enabled, setEnabled] = useState(false);
   const [upInput, setUpInput] = useState("5");
   const [downInput, setDownInput] = useState("5");
-  const [upSelected, setUpSelected] = useState(false);
+  const [upSelected, setUpSelected] = useState(true);
   const [downSelected, setDownSelected] = useState(true);
   const [secondsInput, setSecondsInput] = useState(String(DEFAULT_ALERT_SECONDS));
   const [thresholds, setThresholds] = useState(DEFAULT_THRESHOLDS);
   const [seconds, setSeconds] = useState(DEFAULT_ALERT_SECONDS);
   const [turnoverInput, setTurnoverInput] = useState(String(DEFAULT_TURNOVER_MULTIPLE));
   const [turnoverMultiple, setTurnoverMultiple] = useState(DEFAULT_TURNOVER_MULTIPLE);
+  const [lookbackInput, setLookbackInput] = useState(String(defaultContinuationRule.lookbackHours));
+  const [rangeInput, setRangeInput] = useState(String(defaultContinuationRule.maxRangePercent));
+  const [scoreTurnoverInput, setScoreTurnoverInput] = useState(String(defaultContinuationRule.turnoverMultiple));
+  const [spikeStopInput, setSpikeStopInput] = useState(String(defaultContinuationRule.stopLossPercent));
+  const [spikeTakeInput, setSpikeTakeInput] = useState(String(defaultContinuationRule.takeProfitPercent));
   const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | null>(null);
   const [spikes, setSpikes] = useState<SpikeRecord[]>([]);
   const [recordsReady, setRecordsReady] = useState(false);
@@ -92,6 +98,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const displayedThresholds = serverRule ?? thresholds;
   const displayedSeconds = serverRule?.seconds ?? seconds;
   const displayedMultiple = serverRule?.turnoverMultiple ?? turnoverMultiple;
+  const continuation = serverRule?.continuation ?? defaultContinuationRule;
+  const tradingMode = trading.data?.mode ?? "off";
   const serverSpikes = background.data?.spikes;
   const serverRecords = background.data?.records;
   const history = useMemo(() => mergeAlertHistory(spikes, serverSpikes, serverRecords), [spikes, serverSpikes, serverRecords]);
@@ -109,6 +117,15 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     setSecondsInput(String(storedSeconds));
     setTurnoverInput(String(storedMultiple));
   }, [storedUp, storedDown, storedSeconds, storedMultiple]);
+
+  useEffect(() => {
+    setLookbackInput(String(continuation.lookbackHours));
+    setRangeInput(String(continuation.maxRangePercent));
+    setScoreTurnoverInput(String(continuation.turnoverMultiple));
+    setSpikeStopInput(String(continuation.stopLossPercent));
+    setSpikeTakeInput(String(continuation.takeProfitPercent));
+  }, [continuation.lookbackHours, continuation.maxRangePercent, continuation.turnoverMultiple,
+    continuation.stopLossPercent, continuation.takeProfitPercent]);
 
   useLayoutEffect(() => {
     activeSymbols.current = symbols;
@@ -433,8 +450,24 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   }
 
   function saveServerRule(change: Partial<BackgroundRule>) {
-    const rule = serverRule ?? { ...activeRule.current, enabled: strategyEnabled, notify: strategyNotify };
-    void background.save({ ...rule, ...change });
+    const rule = serverRule ?? {
+      ...activeRule.current, enabled: strategyEnabled, notify: strategyNotify, continuation: defaultContinuationRule,
+    };
+    void background.save({ ...rule, ...change, accountRevision: trading.data?.accountRevision });
+  }
+
+  function saveContinuation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    saveServerRule({ continuation: {
+      ...continuation, lookbackHours: Number(lookbackInput), maxRangePercent: Number(rangeInput),
+      turnoverMultiple: Number(scoreTurnoverInput),
+      stopLossPercent: Number(spikeStopInput), takeProfitPercent: Number(spikeTakeInput),
+    } });
+  }
+
+  function toggleAutoTrade(autoTrade: boolean) {
+    if (autoTrade && !trading.data?.enabled) return;
+    saveServerRule({ continuation: { ...continuation, autoTrade } });
   }
 
   function normalizeThreshold(direction: keyof DirectionalThresholds) {
@@ -572,6 +605,44 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             ? "启用后自动启动独立进程，关闭网页后继续监控。"
             : background.mode === "browser" ? "请保持行情页打开。" : ""}</p>
         </section>
+        <section className={`${styles.result} ${styles.monitorSettings}`} aria-labelledby="spike-continuation-heading">
+          <div className={styles.monitorHeading}>
+            <h4 id="spike-continuation-heading">自动下单</h4>
+            {server && <label className={styles.monitorSwitch}>
+              <input type="checkbox" role="switch" checked={continuation.autoTrade}
+                disabled={!canEdit || (!continuation.autoTrade && !trading.data?.enabled)}
+                onChange={(event) => toggleAutoTrade(event.target.checked)} />
+              自动下单{trading.data?.enabled ? `（${tradingModeLabels[tradingMode]}）` : ""}
+            </label>}
+          </div>
+          {server && <form className={styles.monitorForm} onSubmit={saveContinuation}>
+            <label htmlFor="spike-lookback-hours">异动前回看（小时）</label>
+            <input id="spike-lookback-hours" type="number" min={1} max={4_294_967_295} step={1} required value={lookbackInput}
+              onChange={(event) => setLookbackInput(event.target.value)} />
+            <label htmlFor="spike-range-percent">历史振幅上限（%）</label>
+            <input id="spike-range-percent" type="number" min={0} max={50} step="any" required value={rangeInput}
+              onChange={(event) => setRangeInput(event.target.value)} />
+            <label htmlFor="spike-score-turnover">评分基准成交额倍数</label>
+            <input id="spike-score-turnover" type="number" min={1} step="any" required value={scoreTurnoverInput}
+              onChange={(event) => setScoreTurnoverInput(event.target.value)} />
+            <label htmlFor="spike-stop-loss">新开仓止损（%）</label>
+            <input id="spike-stop-loss" type="number" min={0.1} max={20} step="any" required value={spikeStopInput}
+              onChange={(event) => setSpikeStopInput(event.target.value)} />
+            <label htmlFor="spike-take-profit">新开仓止盈（%）</label>
+            <input id="spike-take-profit" type="number" min={0.1} max={50} step="any" required value={spikeTakeInput}
+              onChange={(event) => setSpikeTakeInput(event.target.value)} />
+            <button type="submit" disabled={!canEdit}>保存评分与保护设置</button>
+          </form>}
+          {server && !trading.data?.enabled && <p>连接「账号设置」中的币安模拟盘或实盘后可启用自动下单。</p>}
+          {background.mode === "browser" && <p>自动下单由本地后台监控执行。</p>}
+          <div className={styles.monitorHelp}>
+            <p><strong>涨跌幅度（60%）</strong> 取异动窗口前 {continuation.lookbackHours} 小时的完整 K 线，按（最高价 − 最低价）÷ 最低价计算振幅。振幅 ≤ {continuation.maxRangePercent}% 得 60 分。</p>
+            <p><strong>告警成交额倍数（30%）</strong> 以 {continuation.turnoverMultiple} 倍为评分基准。告警时的倍数达到基准的 1、2、3 倍分别得 10、20、30 分，低于基准得 0 分。</p>
+            <p><strong>强平估算（10%）</strong> 读取「币种深度调研」的多空强平风险图。上涨时看多头，下跌时看空头。同向预估强平金额占优，且标记价 5% 范围内的预估金额至少占该方向的 20%，得 10 分。模型取不到时计 0 分。</p>
+            <p>每轮确认告警后评估一次。总分 ≥ 80 且开启自动下单时，上涨做多、下跌做空，以 1 倍杠杆提交币安允许的最小市价单。信号有效期 45 秒。</p>
+            <p>开仓成交后，后台以实际成交均价为基准，先挂标记价止损 {continuation.stopLossPercent}% 和止盈 {continuation.takeProfitPercent}%，再在止盈距离的 75% 处挂限价平多或平空。价格按合约步长校准。最长持仓 5 分钟，到期自动撤单并市价平仓。</p>
+          </div>
+        </section>
         <AlertRecords records={history} canDelete={recordsReady && canEdit} onDelete={deleteAlertRecords} />
       </div>
     </details>
@@ -590,7 +661,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       {strategy}
       <TestStrategy mode={trading.mode} status={trading.data} error={trading.error} onSubmit={trading.placeTestOrder} />
       <TradeRecords trades={trading.data?.trades ?? []} activeMode={trading.data?.enabled ? trading.data.mode : "off"}
-        canDelete={trading.mode === "local"} onDelete={trading.deleteTrades} onClose={trading.closeTrade} />
+        accountRevision={trading.data?.accountRevision} canDelete={trading.mode === "local"}
+        onDelete={trading.deleteTrades} onClose={trading.closeTrade} onManage={trading.manageTrade} />
     </section>
   );
 }

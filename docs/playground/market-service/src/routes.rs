@@ -17,7 +17,7 @@ use crate::notifications::{format_event, Notifier};
 use crate::now_ms;
 use crate::store::Store;
 use crate::strategy::{Rule, MAX_WINDOW_SECONDS, MIN_WINDOW_SECONDS};
-use crate::trading::Trader;
+use crate::trading::{PositionRequest, Trader};
 
 const DAY_MS: i64 = 86_400_000;
 const BEIJING_OFFSET_MS: i64 = 28_800_000;
@@ -40,7 +40,7 @@ pub fn router(
     notifier: Arc<Notifier>,
     trader: Option<Arc<Trader>>,
     token: Option<Arc<str>>,
-) -> crate::store::Result<Router> {
+) -> crate::store::Result<(Router, Arc<crate::liquidation::Loader>)> {
     let markets = Arc::new(Markets::new(Arc::clone(&binance))?);
     let research = Arc::new(crate::research::Research::new(Arc::clone(&markets))?);
     let liquidation = Arc::new(crate::liquidation::Loader::new(
@@ -66,8 +66,9 @@ pub fn router(
         .route("/api/trading/account", axum::routing::put(trading_account))
         .route("/api/trading/test-order", post(trading_test_order))
         .route("/api/trading/close", post(trading_close))
+        .route("/api/trading/position", post(trading_position))
         .route_layer(middleware::from_fn_with_state(token, require_local_token));
-    Ok(Router::new()
+    let app = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/api/markets/contracts", get(contracts))
         .route("/api/markets/contract-market-caps", get(contract_caps))
@@ -86,11 +87,12 @@ pub fn router(
             markets,
             store,
             notifier,
-            liquidation,
+            liquidation: Arc::clone(&liquidation),
             research,
             holders,
             trader,
-        }))
+        });
+    Ok((app, liquidation))
 }
 
 #[derive(Deserialize)]
@@ -459,16 +461,27 @@ async fn monitor_rule(
         if value.get("up").is_none() || value.get("down").is_none() {
             return None;
         }
+        let revision = value["accountRevision"].as_str().and_then(|revision| uuid::Uuid::parse_str(revision).ok());
         serde_json::from_value::<Rule>(value)
             .ok()
             .filter(|rule| rule.is_valid())
+            .map(|rule| (rule, revision))
     });
-    let Some(rule) = rule else {
+    let Some((rule, revision)) = rule else {
         return error(
             StatusCode::BAD_REQUEST,
-            "请检查时间窗口、涨跌幅和成交额倍数。",
+            "请检查告警时间窗口、涨跌幅、成交额倍数和延续评分参数。",
         );
     };
+    if rule.continuation.auto_trade {
+        let (Some(trader), Some(revision)) = (state.trader, revision) else {
+            return no_store(error(StatusCode::BAD_REQUEST, "请连接币安账号后再保存自动下单设置。"));
+        };
+        if let Err(message) = trader.save_automatic_rule(rule, revision).await {
+            return no_store(error(StatusCode::BAD_REQUEST, &message));
+        }
+        return store_response(move || store.status(now_ms()), "无法读取后台监控记录。").await;
+    }
     store_response(
         move || {
             store.save_rule(rule)?;
@@ -632,7 +645,7 @@ async fn trading_delete(
     };
     match trader.delete_finished_trades(&request.trade_ids).await {
         Ok(true) => no_store(Json(json!({"deleted": true})).into_response()),
-        Ok(false) => no_store(error(StatusCode::CONFLICT, "进行中的交易不能删除，请等交易结束后重试。")),
+        Ok(false) => no_store(error(StatusCode::CONFLICT, "选中的交易仍在进行或同步，请稍后重试。")),
         Err(_) => no_store(error(StatusCode::INTERNAL_SERVER_ERROR, "无法删除下单记录。")),
     }
 }
@@ -704,6 +717,32 @@ async fn trading_close(
         return no_store(error(StatusCode::BAD_REQUEST, "请选择要平仓的交易。"));
     };
     trading_response(trader.close(&id).await)
+}
+
+async fn trading_position(
+    State(state): State<Service>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "交易操作仅在本地设置模式下可用。"));
+    };
+    if !has_json(&headers) {
+        return no_store(error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "需要 JSON 格式的请求。"));
+    }
+    if body_too_large(&body) {
+        return no_store(error(StatusCode::PAYLOAD_TOO_LARGE, "请求体过大。"));
+    }
+    let request = body.ok().and_then(|Json(value)| {
+        if !text_within(&value["tradeId"], 200) {
+            return None;
+        }
+        serde_json::from_value::<PositionRequest>(value).ok()
+    });
+    let Some(request) = request else {
+        return no_store(error(StatusCode::BAD_REQUEST, "请检查交易、账号、限价或止损止盈触发价。"));
+    };
+    trading_response(trader.manage_position(request).await)
 }
 
 fn trading_response(result: Result<Value, String>) -> Response {
@@ -780,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn internal_routes_require_a_server_token_before_reading_json() {
         let token: Arc<str> = "a".repeat(64).into();
-        let app = router(
+        let (app, _) = router(
             Arc::new(Binance::new()),
             None,
             Arc::new(Notifier::new(false).unwrap()),
@@ -815,6 +854,7 @@ mod tests {
             ("/api/trading", Method::DELETE),
             ("/api/trading/account", Method::PUT),
             ("/api/trading/test-order", Method::POST),
+            ("/api/trading/position", Method::POST),
             ("/api/trading/close", Method::POST),
         ] {
             assert_eq!(

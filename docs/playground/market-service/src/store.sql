@@ -26,3 +26,6 @@ CREATE TABLE IF NOT EXISTS trade (
 );
 CREATE INDEX IF NOT EXISTS trade_status ON trade (status);
 CREATE INDEX IF NOT EXISTS trade_time ON trade (openedAt);
+CREATE TABLE IF NOT EXISTS trade_operation (
+    tradeId TEXT PRIMARY KEY, owner TEXT NOT NULL, expiresAt INTEGER NOT NULL
+);

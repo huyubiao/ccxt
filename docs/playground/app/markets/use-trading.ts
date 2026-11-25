@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
 import { readMarketResponse } from "@/lib/market-response";
-import type { TestOrderRequest, Trade, TradingAccountRequest, TradingStatus } from "@/lib/trading-types";
+import type { PositionRequest, TestOrderRequest, Trade, TradingAccountRequest, TradingStatus } from "@/lib/trading-types";
 
 const statusEndpoint = apiUrl("/api/trading");
 const POLL_MS = 4000;
@@ -75,6 +75,12 @@ export function useTrading() {
     run(() => update<{ trade: Trade }>("/api/trading/test-order", "POST", request, "测试策略下单失败。")), [run]);
   const closeTrade = useCallback((tradeId: string) =>
     run(() => update<{ trade: Trade }>("/api/trading/close", "POST", { tradeId }, "平仓失败。")), [run]);
+  const manageTrade = useCallback((request: PositionRequest) =>
+    run(async () => {
+      const { trade } = await update<{ trade: Trade }>("/api/trading/position", "POST", request, "持仓操作失败。");
+      setData((current) => current && { ...current, trades: current.trades.map((row) => row.id === trade.id ? trade : row) });
+      return trade;
+    }), [run]);
   const deleteTrades = useCallback((tradeIds: readonly string[]) =>
     run(async () => {
       await update("/api/trading", "DELETE", { tradeIds }, "无法删除下单记录。");
@@ -88,5 +94,5 @@ export function useTrading() {
       setError("");
     }), [run]);
 
-  return { mode, data, error, placeTestOrder, closeTrade, deleteTrades, changeAccount };
+  return { mode, data, error, placeTestOrder, closeTrade, manageTrade, deleteTrades, changeAccount };
 }

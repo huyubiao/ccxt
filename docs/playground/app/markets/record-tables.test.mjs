@@ -23,7 +23,7 @@ const hooks = registerHooks({
     if (/\.tsx?$/.test(url)) {
       const { source } = nextLoad(url, { ...context, format: "module" });
       const { outputText } = ts.transpileModule(source.toString(), {
-        compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext },
+        compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
       });
       return { format: "module", source: outputText, shortCircuit: true };
     }
@@ -31,16 +31,17 @@ const hooks = registerHooks({
   },
 });
 const { default: AlertRecords } = await import("./alert-records.tsx");
-const { default: TradeRecords } = await import("./trade-records.tsx");
+const { default: TradeRecords, PositionControls } = await import("./trade-records.tsx");
 const { default: TestStrategy } = await import("./test-strategy.tsx");
 const { default: BinanceSettings } = await import("./binance-settings.tsx");
+const { mergeAlertHistory } = await import("../../lib/alert-history.ts");
 hooks.deregister();
 
 const emptyRecords = { records: [], canDelete: true, onDelete: async () => {} };
 const cases = [
   ["告警记录", AlertRecords, emptyRecords, [
     "全选", "交易对", "告警级别", "触发时间", "参考价/触发价 (USDT)", "当日涨跌幅度",
-    "窗口涨跌幅/阈值", "窗口 (秒)", "成交额 (USDT)", "核验结果",
+    "窗口涨跌幅/阈值", "窗口 (秒)", "成交额 (USDT)", "核验结果", "延续评分与下单",
   ]],
   ["下单记录", TradeRecords, { trades: [], activeMode: "off", canDelete: true, onDelete: async () => {}, onClose: async () => {} }, [
     "全选", "交易对", "状态", "净盈亏 (USDT)", "实际成交均价", "手续费 (USDT)", "开仓时间", "操作",
@@ -57,6 +58,21 @@ for (const [label, Component, props, columns] of cases) {
     if (columns[0] === "全选") assert.match(html, /<input[^>]*disabled=""[^>]*>/);
   });
 }
+
+test("a scored alert shows the submitted direction and the three actual weights", () => {
+  const spike = { symbol: "BTCUSDT", level: 1, time: 1, price: 95, previous: 100, change: -5, threshold: -5,
+    seconds: 30, requiredMultiple: 3, status: "alerted" };
+  const records = mergeAlertHistory([], [spike], [{ event: { ...spike, continuation: {
+      status: "ordered", side: "short", target: 80,
+      score: { total: 80, pricePoints: 60, turnoverPoints: 10, liquidationPoints: 10,
+        rangePercent: 4.5, dominantSide: "short", nearSharePercent: 25 },
+    } } }]);
+  const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+  assert.match(html, /80 分 · 做空 · 已开仓/);
+  assert.match(html, /涨跌幅 60\/60（振幅 4.5%）/);
+  assert.match(html, /成交额 10\/30/);
+  assert.match(html, /强平 10\/10（空头占优，同向近价占比 25%）/);
+});
 
 test("trade selection includes finished trades and protects active trades", () => {
   const fixture = {
@@ -77,6 +93,20 @@ test("trade selection includes finished trades and protects active trades", () =
   assert.match(checkboxes[1], /disabled="".*选择 BTCUSDT/);
   assert.doesNotMatch(checkboxes[2], /disabled=""/);
   assert.match(checkboxes[0], /全选筛选结果中所有已结束的下单记录/);
+});
+
+test("position controls distinguish long and short exits and preserve a partial limit fill", () => {
+  const trade = { symbol: "BTCUSDT", side: "long", stopLoss: 95, takeProfit: 110, orders: [] };
+  const controls = (trade) => renderToStaticMarkup(createElement(PositionControls, { trade, disabled: false, onManage: async () => {} }));
+  const long = controls(trade);
+  assert.match(long, />限价平多<\/button>/);
+  assert.match(long, /name="stopLossPrice"/);
+  assert.match(long, /name="takeProfitPrice"/);
+  assert.match(controls({ ...trade, side: "short" }), />限价平空<\/button>/);
+  const pending = controls({ ...trade, orders: [{ kind: "limit-exit", status: "placed", limitPrice: 103, amount: 2,
+    execution: { filled: 0.5, quote: 51.5 } }] });
+  assert.match(pending, /已成交 0.5 \/ 2/);
+  assert.match(pending, />撤销限价平仓单<\/button>/);
 });
 
 test("trade rows show confirmed fills and combined fees with details collapsed", () => {

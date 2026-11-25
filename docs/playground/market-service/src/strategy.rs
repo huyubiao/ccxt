@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_WINDOW_SECONDS: u32 = 10;
 pub const MAX_WINDOW_SECONDS: u32 = 300;
+pub const MARKET_SPIKE_ID: &str = "market-spike";
 pub const MARKET_SPIKE_NAME: &str = "异动监控策略";
 const MIN_PERCENT: f64 = 2.0;
 const MAX_PERCENT: f64 = 100.0;
@@ -21,6 +22,34 @@ pub struct Rule {
     pub down: Option<f64>,
     pub seconds: u32,
     pub turnover_multiple: f64,
+    #[serde(default)]
+    pub continuation: ContinuationRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ContinuationRule {
+    pub auto_trade: bool,
+    pub lookback_hours: u32,
+    pub max_range_percent: f64,
+    pub turnover_multiple: f64,
+    pub stop_loss_percent: f64,
+    pub take_profit_percent: f64,
+}
+
+impl Default for ContinuationRule {
+    fn default() -> Self {
+        Self {
+            auto_trade: false, lookback_hours: 24, max_range_percent: 5.0, turnover_multiple: 5.0,
+            stop_loss_percent: 1.0, take_profit_percent: 1.0,
+        }
+    }
+}
+
+impl ContinuationRule {
+    pub fn limit_exit_percent(self) -> f64 {
+        self.take_profit_percent * 0.75
+    }
 }
 
 impl Rule {
@@ -32,6 +61,12 @@ impl Rule {
                 .is_none_or(|down| (-MAX_PERCENT..=-MIN_PERCENT).contains(&down))
             && (MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).contains(&self.seconds)
             && (MIN_TURNOVER_MULTIPLE..=MAX_TURNOVER_MULTIPLE).contains(&self.turnover_multiple)
+            && self.continuation.lookback_hours >= 1
+            && (0.0..=50.0).contains(&self.continuation.max_range_percent)
+            && self.continuation.turnover_multiple.is_finite()
+            && self.continuation.turnover_multiple >= 1.0
+            && (0.1..=20.0).contains(&self.continuation.stop_loss_percent)
+            && (0.1..=50.0).contains(&self.continuation.take_profit_percent)
     }
 
     pub fn restore_saved(mut self) -> Self {
@@ -50,10 +85,11 @@ impl Default for Rule {
         Self {
             enabled: false,
             notify: false,
-            up: None,
+            up: Some(5.0),
             down: Some(-5.0),
             seconds: 30,
             turnover_multiple: 3.0,
+            continuation: ContinuationRule::default(),
         }
     }
 }

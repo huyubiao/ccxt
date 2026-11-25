@@ -51,6 +51,8 @@
 .alertTable input[type="checkbox"] { margin: 0; accent-color: hsl(var(--brand)); vertical-align: middle; }
 .alertSelectAll { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .alertSelectAll:has(input:disabled) { cursor: default; }
+.alertContinuation { min-width: 150px; max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
+.alertContinuation summary { cursor: pointer; }
 .monitorSettings { padding: 16px; }
 .monitorSettings p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .monitorForm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -494,6 +496,9 @@
   overflow-wrap: anywhere;
 }
 .tradeDetailGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
+.tradePositionControls { display: grid; justify-items: start; gap: 8px; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid hsl(var(--border)); }
+.tradePositionControls label, .tradePositionControls .tradeActions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.tradePositionControls small { color: hsl(var(--muted-foreground)); }
 .tradeDetailGrid dt { color: hsl(var(--muted-foreground)); font-size: 12px; }
 .tradeDetailGrid dd { margin: 3px 0 0; font-variant-numeric: tabular-nums; }
 .tradeOrders { margin-top: 12px; }

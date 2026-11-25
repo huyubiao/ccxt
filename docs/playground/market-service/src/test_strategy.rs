@@ -8,7 +8,7 @@
 
 use serde::Deserialize;
 
-use crate::trading::{OrderIntent, Side};
+use crate::trading::{OrderIntent, OrderSize, Side};
 
 pub const ID: &str = "test";
 pub const NAME: &str = "测试策略";
@@ -37,10 +37,11 @@ impl Request {
             strategy_name: NAME.into(),
             symbol: self.symbol.trim().to_ascii_uppercase(),
             side: self.direction,
-            notional: self.notional,
+            size: OrderSize::Notional(self.notional),
             leverage: self.leverage,
             stop_loss_percent: self.stop_loss_percent,
             take_profit_percent: self.take_profit_percent,
+            limit_exit_percent: None,
             max_hold_seconds: self.hold_minutes.saturating_mul(60),
             note: note.into(),
         }
