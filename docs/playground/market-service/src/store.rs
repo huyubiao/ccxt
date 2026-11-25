@@ -374,6 +374,28 @@ impl Store {
         )
     }
 
+    /// Remove completed trades as one batch. A missing ID is safe to retry.
+    pub fn delete_finished_trades(&self, ids: &[String]) -> Result<bool> {
+        let ids = serde_json::to_string(ids)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let blocked: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM trade WHERE id IN (SELECT value FROM json_each(?))
+                AND status NOT IN ('closed', 'failed'))",
+            [&ids],
+            |row| row.get(0),
+        )?;
+        if blocked {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM trade WHERE id IN (SELECT value FROM json_each(?)) AND status IN ('closed', 'failed')",
+            [&ids],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn prune(&self, now: i64) -> Result<()> {
         let db = self.db()?;
         let cutoff = now - RETENTION_MS;
@@ -426,6 +448,25 @@ pub fn spike_id(event: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletes_finished_trades_atomically_and_accepts_a_retry() {
+        let store = Store::open_memory().unwrap();
+        for phase in ["opening", "open", "closing", "closed", "failed"] {
+            store.save_trade(&json!({
+                "id": phase, "symbol": "BTCUSDT", "status": phase, "openedAt": 1
+            })).unwrap();
+        }
+        assert!(!store.delete_finished_trades(&["closed".into(), "open".into()]).unwrap());
+        assert!(store.trade("closed").unwrap().is_some());
+        let selection = ["failed".into(), "closed".into()];
+        assert!(store.delete_finished_trades(&selection).unwrap());
+        assert!(store.delete_finished_trades(&selection).unwrap());
+        assert!(store.trade("closed").unwrap().is_none());
+        assert!(store.trade("failed").unwrap().is_none());
+        assert_eq!(store.recent_trades(100).unwrap().len(), 3);
+        assert_eq!(store.active_trades().unwrap().len(), 3);
+    }
 
     #[test]
     fn reads_legacy_rule_with_current_alert_limits() {

@@ -9,6 +9,7 @@
 //! - `demo`：币安模拟盘（Demo Trading，demo-fapi.binance.com），使用模拟盘 API Key。
 //! - `live`：币安实盘，必须额外设置确认变量，单笔金额上限默认更低。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,8 @@ use crate::store::Store;
 pub const LIVE_CONFIRMATION: &str = "YES_I_UNDERSTAND_REAL_MONEY";
 const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const BALANCE_CACHE_MS: i64 = 15_000;
-const HISTORY_LIMIT: i64 = 100;
+const EXECUTION_RETRY_MS: i64 = 60_000;
+pub(crate) const HISTORY_LIMIT: i64 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -231,6 +233,19 @@ pub struct OrderIntent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Execution {
+    pub filled: f64,
+    pub quote: f64,
+}
+
+impl Execution {
+    fn average(&self) -> f64 {
+        self.quote / self.filled
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TradeOrder {
     /// entry | stop-loss | take-profit | exit
     pub kind: String,
@@ -239,6 +254,7 @@ pub struct TradeOrder {
     pub trigger_price: Option<f64>,
     pub exchange_id: Option<String>,
     pub average: Option<f64>,
+    pub execution: Option<Execution>,
     /// placed | filled | canceled | triggered | failed
     pub status: String,
     pub error: Option<String>,
@@ -311,6 +327,13 @@ impl Trade {
             order.status = status.into();
         }
     }
+
+    fn order_needs_execution(&self, order: &TradeOrder) -> bool {
+        order.execution.is_none() && order.exchange_id.is_some()
+            && matches!(order.status.as_str(), "filled" | "triggered" | "placed")
+            && (matches!(order.kind.as_str(), "entry" | "exit")
+                || matches!(self.status.as_str(), "closed" | "failed"))
+    }
 }
 
 type TradeResult<T> = Result<T, String>;
@@ -348,6 +371,7 @@ pub struct Trader {
     /// Serializes submit / close / periodic checks so one trade is never handled twice.
     operations: Mutex<()>,
     balance: Mutex<Option<(i64, Value)>>,
+    execution_attempts: Mutex<HashMap<String, i64>>,
 }
 
 impl Trader {
@@ -358,6 +382,7 @@ impl Trader {
             market_data,
             operations: Mutex::new(()),
             balance: Mutex::new(None),
+            execution_attempts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -426,6 +451,11 @@ impl Trader {
             "balance": self.balance(account.exchange.as_ref()).await,
             "trades": trades,
         })
+    }
+
+    pub async fn delete_finished_trades(&self, ids: &[String]) -> crate::store::Result<bool> {
+        let _operation = self.operations.lock().await;
+        self.store.delete_finished_trades(ids)
     }
 
     async fn balance(&self, exchange: Option<&Mutex<BinanceusdmCore>>) -> Value {
@@ -583,15 +613,20 @@ impl Trader {
                 return Err(trade.error.clone().unwrap_or_default());
             }
         };
-        let entry_price = match number(&entry["average"]).filter(|price| *price > 0.0) {
+        let entry_record = order_record("entry", intent.side.entry(), amount, None, &entry, "filled");
+        let entry_price = match entry_record.average {
             Some(price) => price,
             None => position_rows(&mut core, &intent.symbol).await.ok()
                 .map(|rows| position_value(&rows, &intent.symbol, intent.side.position_side(), "entryPrice"))
                 .filter(|price| *price > 0.0).unwrap_or(mark),
         };
-        trade.orders.push(order_record("entry", intent.side.entry(), amount, None, &entry, "filled"));
-        trade.entry_price = Some(entry_price);
-        trade.notional = amount * entry_price;
+        let amount = entry_record.execution.as_ref().map_or(amount, |execution| execution.filled);
+        trade.entry_price = entry_record.average;
+        if let Some(execution) = &entry_record.execution {
+            trade.amount = execution.filled;
+            trade.notional = execution.quote;
+        }
+        trade.orders.push(entry_record);
         let sign = intent.side.sign();
         let stop_loss = entry_price * (1.0 - sign * intent.stop_loss_percent / 100.0);
         let take_profit = entry_price * (1.0 + sign * intent.take_profit_percent / 100.0);
@@ -736,26 +771,10 @@ impl Trader {
 
     /// The position is gone: one of the protective orders fired (or it was closed by hand).
     async fn finish_exchange_exit(&self, core: &mut BinanceusdmCore, trade: &mut Trade) {
-        let stop_gone = !cancel_trigger(core, trade, "stop-loss").await;
-        let profit_gone = !cancel_trigger(core, trade, "take-profit").await;
-        let reason = match (stop_gone, profit_gone) {
-            (true, false) => {
-                trade.mark_order("stop-loss", "triggered");
-                "止损触发"
-            }
-            (false, true) => {
-                trade.mark_order("take-profit", "triggered");
-                "止盈触发"
-            }
-            _ => "仓位已在交易所平掉（来源未知）",
-        };
-        trade.exit_price = match reason {
-            "止损触发" => trade.stop_loss,
-            "止盈触发" => trade.take_profit,
-            _ => None,
-        };
+        cancel_trigger(core, trade, "stop-loss").await;
+        cancel_trigger(core, trade, "take-profit").await;
         trade.status = "closed".into();
-        trade.exit_reason = Some(reason.into());
+        trade.exit_reason = Some("仓位已在交易所平掉（来源待核实）".into());
         trade.closed_at = Some(now_ms());
         let _ = self.save(trade);
     }
@@ -778,10 +797,9 @@ impl Trader {
             let (side, amount, params) = closing_order(trade, remaining);
             match place(core, &trade.unified_symbol, side, amount, params).await {
                 Ok(order) => {
-                    trade.exit_price = number(&order["average"]).filter(|price| *price > 0.0);
-                    trade
-                        .orders
-                        .push(order_record("exit", side, amount, None, &order, "filled"));
+                    let exit = order_record("exit", side, amount, None, &order, "filled");
+                    trade.exit_price = exit.average;
+                    trade.orders.push(exit);
                 }
                 Err(error) => {
                     trade.orders.push(failed_order("exit", side, amount, None, &error));
@@ -815,12 +833,65 @@ impl Trader {
     async fn invalidate_balance(&self) {
         *self.balance.lock().await = None;
     }
+
+    /// Read-only reconciliation of one incomplete trade per pass. Both the
+    /// mode and account key must match the recorded trade.
+    async fn refresh_executions(&self) {
+        let Ok(_operation) = self.operations.try_lock() else { return; };
+        let account = self.account.read().await;
+        let Some(exchange) = &account.exchange else { return; };
+        let Ok(rows) = self.store.recent_trades(HISTORY_LIMIT) else { return; };
+        let mut attempts = self.execution_attempts.lock().await;
+        let now = now_ms();
+        attempts.retain(|_, time| now - *time < 30 * EXECUTION_RETRY_MS);
+        let Some(mut trade) = rows.into_iter()
+            .filter_map(|row| serde_json::from_value::<Trade>(row).ok())
+            .filter(|trade| trade.mode == account.settings.mode
+                && account.matches_key(trade.account_fingerprint.as_deref())
+                && attempts.get(&trade.id).is_none_or(|last| now - *last >= EXECUTION_RETRY_MS)
+                && trade.orders.iter().any(|order| trade.order_needs_execution(order)))
+            .min_by_key(|trade| attempts.get(&trade.id).copied().unwrap_or_default())
+        else { return; };
+        let Ok(mut core) = exchange.try_lock() else { return; };
+        attempts.insert(trade.id.clone(), now);
+        drop(attempts);
+        let deadline = tokio::time::Instant::now() + CHECK_INTERVAL;
+        let mut changed = false;
+        for index in 0..trade.orders.len() {
+            let order = &trade.orders[index];
+            if !trade.order_needs_execution(order) {
+                continue;
+            }
+            let result = tokio::time::timeout_at(deadline, fetch_execution(&mut core, &trade, order)).await;
+            let Ok(execution) = result else { break; };
+            let Some(execution) = execution else { continue; };
+            let order = &mut trade.orders[index];
+            order.average = Some(execution.average());
+            if order.kind == "entry" {
+                trade.entry_price = order.average;
+            } else if order.kind == "exit" {
+                trade.exit_price = order.average;
+            } else {
+                order.status = "triggered".into();
+                trade.exit_price = order.average;
+                if trade.exit_reason.as_deref().is_some_and(|reason| reason.contains("来源")) {
+                    trade.exit_reason = Some(if order.kind == "stop-loss" { "止损触发" } else { "止盈触发" }.into());
+                }
+            }
+            order.execution = Some(execution);
+            changed = true;
+        }
+        if changed {
+            let _ = self.save(&trade);
+        }
+    }
 }
 
 /// Background loop: checks active trades every few seconds until shutdown.
 pub async fn supervise(trader: Arc<Trader>, mut stop: watch::Receiver<bool>) {
     while !*stop.borrow() {
         trader.check().await;
+        trader.refresh_executions().await;
         tokio::select! {
             _ = tokio::time::sleep(CHECK_INTERVAL) => {},
             _ = stop.changed() => {},
@@ -1031,14 +1102,64 @@ fn order_amount(
     Ok(precise)
 }
 
+fn confirmed_execution(filled: &Value, quote: &Value, average: &Value) -> Option<Execution> {
+    let filled = number(filled).filter(|value| *value > 0.0)?;
+    let quote = number(quote).filter(|value| *value > 0.0)
+        .or_else(|| number(average).map(|average| filled * average))
+        .filter(|quote| quote.is_finite() && *quote > 0.0)?;
+    Some(Execution { filled, quote })
+}
+
+fn binance_execution(order: &Value) -> Option<Execution> {
+    if !matches!(order["status"].as_str(), Some("FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH")) {
+        return None;
+    }
+    confirmed_execution(&order["executedQty"], &order["cumQuote"], &order["avgPrice"])
+}
+
+fn order_id(value: &Value) -> Option<String> {
+    let id = value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| id.to_string()))?;
+    (!id.is_empty() && id.bytes().all(|digit| digit.is_ascii_digit()) && id.bytes().any(|digit| digit != b'0')).then_some(id)
+}
+
+async fn fetch_execution(core: &mut BinanceusdmCore, trade: &Trade, order: &TradeOrder) -> Option<Execution> {
+    let mut id = order.exchange_id.clone()?;
+    if order.kind == "stop-loss" || order.kind == "take-profit" {
+        let request = [ExchangeValue::from_json(&json!({"algoId": id}))];
+        let trigger = typed(core.fapi_private_get_algo_order(&request)).await.ok()?.to_json();
+        id = order_id(&trigger["actualOrderId"])?;
+    }
+    let request = [ExchangeValue::from_json(&json!({"symbol": trade.symbol, "orderId": id}))];
+    let execution = typed(core.fapi_private_get_order(&request)).await.ok()?.to_json();
+    let position = if trade.hedged { trade.side.position_side() } else { "BOTH" };
+    if execution["symbol"] != trade.symbol.as_str() || execution["positionSide"] != position
+        || !execution["side"].as_str().is_some_and(|side| side.eq_ignore_ascii_case(&order.side))
+    {
+        return None;
+    }
+    binance_execution(&execution)
+}
+
 fn order_record(kind: &str, side: &str, amount: f64, trigger: Option<f64>, order: &Value, status: &str) -> TradeOrder {
+    let execution = if trigger.is_some() {
+        None
+    } else {
+        binance_execution(&order["info"]).or_else(|| {
+            if order["status"] == "closed" {
+                confirmed_execution(&order["filled"], &order["cost"], &order["average"])
+            } else {
+                None
+            }
+        })
+    };
     TradeOrder {
         kind: kind.into(),
         side: side.into(),
         amount,
         trigger_price: trigger,
-        exchange_id: order["id"].as_str().map(str::to_owned),
-        average: number(&order["average"]).filter(|price| *price > 0.0),
+        exchange_id: order_id(&order["id"]),
+        average: execution.as_ref().map(Execution::average),
+        execution,
         status: status.into(),
         error: None,
         time: now_ms(),
@@ -1053,6 +1174,7 @@ fn failed_order(kind: &str, side: &str, amount: f64, trigger: Option<f64>, error
         trigger_price: trigger,
         exchange_id: None,
         average: None,
+        execution: None,
         status: "failed".into(),
         error: Some(error.into()),
         time: now_ms(),
@@ -1286,5 +1408,21 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(database).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn recorded_execution_uses_filled_quantity_and_current_order_quote() {
+        let wire = json!({"status":"FILLED", "executedQty":"0.002", "cumQuote":"201.5", "avgPrice":"100750"});
+        let execution = binance_execution(&wire).unwrap();
+        assert_eq!(execution.filled, 0.002);
+        assert_eq!(execution.quote, 201.5);
+        assert_eq!(execution.average(), 100_750.0);
+        let pending = json!({"status":"NEW","executedQty":"0","origQty":"0.002","price":"100750"});
+        assert!(binance_execution(&pending).is_none());
+        let protective = order_record("take-profit", "sell", 0.002, Some(101_000.0),
+            &json!({"id":"789","price":101_000,"status":"open"}), "placed");
+        assert!(protective.average.is_none() && protective.execution.is_none());
+        assert_eq!(order_id(&json!("9876543210987654321")).as_deref(), Some("9876543210987654321"));
+        assert!(order_id(&json!("")).is_none());
     }
 }

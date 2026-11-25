@@ -2,6 +2,9 @@
 export type TradingMode = "off" | "demo" | "live";
 export type TradeSide = "long" | "short";
 export type TradeStatus = "opening" | "open" | "closing" | "closed" | "failed";
+export const STANDARD_TAKER_FEE_RATE = 0.0005;
+
+export type TradeExecution = { filled: number; quote: number };
 
 export type TradeOrder = {
   kind: "entry" | "stop-loss" | "take-profit" | "exit";
@@ -10,6 +13,7 @@ export type TradeOrder = {
   triggerPrice: number | null;
   exchangeId: string | null;
   average: number | null;
+  execution?: TradeExecution | null;
   status: "placed" | "filled" | "canceled" | "triggered" | "failed";
   error: string | null;
   time: number;
@@ -86,9 +90,27 @@ export function isTradeActive(trade: Pick<Trade, "status">) {
   return trade.status === "opening" || trade.status === "open" || trade.status === "closing";
 }
 
-/** Realized PnL in USDT before fees, when both prices are known. */
-export function tradePnl(trade: Pick<Trade, "side" | "amount" | "entryPrice" | "exitPrice">) {
-  if (trade.entryPrice === null || trade.exitPrice === null) return null;
+export function tradeExecution(trade: Pick<Trade, "side" | "orders">) {
+  const entry = { filled: 0, quote: 0 };
+  const exit = { filled: 0, quote: 0 };
+  for (const order of trade.orders) {
+    const execution = order.execution;
+    if (!execution || !Number.isFinite(execution.filled) || !Number.isFinite(execution.quote) ||
+        execution.filled <= 0 || execution.quote <= 0) continue;
+    const leg = order.kind === "entry" ? entry : exit;
+    leg.filled += execution.filled;
+    leg.quote += execution.quote;
+  }
+  const entryFee = entry.filled > 0 ? entry.quote * STANDARD_TAKER_FEE_RATE : null;
+  const exitFee = exit.filled > 0 ? exit.quote * STANDARD_TAKER_FEE_RATE : null;
   const sign = trade.side === "long" ? 1 : -1;
-  return (trade.exitPrice - trade.entryPrice) * trade.amount * sign;
+  const complete = Math.abs(entry.filled - exit.filled) <= Math.max(entry.filled, exit.filled) * 1e-8;
+  return {
+    entryPrice: entry.filled > 0 ? entry.quote / entry.filled : null,
+    exitPrice: exit.filled > 0 ? exit.quote / exit.filled : null,
+    entryFee,
+    exitFee,
+    netPnl: complete && entryFee !== null && exitFee !== null
+      ? (exit.quote - entry.quote) * sign - entryFee - exitFee : null,
+  };
 }

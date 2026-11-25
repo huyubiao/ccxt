@@ -62,7 +62,7 @@ pub fn router(
                 .put(notification_settings)
                 .post(notification_send),
         )
-        .route("/api/trading", get(trading_status))
+        .route("/api/trading", get(trading_status).delete(trading_delete))
         .route("/api/trading/account", axum::routing::put(trading_account))
         .route("/api/trading/test-order", post(trading_test_order))
         .route("/api/trading/close", post(trading_close))
@@ -603,6 +603,40 @@ async fn trading_status(State(state): State<Service>) -> Response {
     no_store(Json(trader.status().await).into_response())
 }
 
+async fn trading_delete(
+    State(state): State<Service>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "下单记录仅可在本机删除。"));
+    };
+    if !has_json(&headers) {
+        return no_store(error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "需要 JSON 格式的下单记录。"));
+    }
+    if body_too_large(&body) {
+        return no_store(error(StatusCode::PAYLOAD_TOO_LARGE, "请求体过大。"));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DeleteTrades {
+        trade_ids: Vec<String>,
+    }
+    let Some(request) = body.ok()
+        .and_then(|Json(value)| serde_json::from_value::<DeleteTrades>(value).ok())
+        .filter(|request| !request.trade_ids.is_empty()
+            && request.trade_ids.len() <= crate::trading::HISTORY_LIMIT as usize
+            && request.trade_ids.iter().all(|id| !id.trim().is_empty() && id.encode_utf16().count() <= 200))
+    else {
+        return no_store(error(StatusCode::BAD_REQUEST, "请选择有效的下单记录。"));
+    };
+    match trader.delete_finished_trades(&request.trade_ids).await {
+        Ok(true) => no_store(Json(json!({"deleted": true})).into_response()),
+        Ok(false) => no_store(error(StatusCode::CONFLICT, "进行中的交易不能删除，请等交易结束后重试。")),
+        Err(_) => no_store(error(StatusCode::INTERNAL_SERVER_ERROR, "无法删除下单记录。")),
+    }
+}
+
 async fn trading_account(
     State(state): State<Service>,
     headers: HeaderMap,
@@ -778,6 +812,7 @@ mod tests {
             (monitor, Method::PUT),
             (monitor, Method::DELETE),
             ("/api/trading", Method::GET),
+            ("/api/trading", Method::DELETE),
             ("/api/trading/account", Method::PUT),
             ("/api/trading/test-order", Method::POST),
             ("/api/trading/close", Method::POST),

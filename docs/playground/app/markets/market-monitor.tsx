@@ -590,7 +590,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       {strategy}
       <TestStrategy mode={trading.mode} status={trading.data} error={trading.error} onSubmit={trading.placeTestOrder} />
       <TradeRecords trades={trading.data?.trades ?? []} activeMode={trading.data?.enabled ? trading.data.mode : "off"}
-        onClose={trading.closeTrade} />
+        canDelete={trading.mode === "local"} onDelete={trading.deleteTrades} onClose={trading.closeTrade} />
     </section>
   );
 }

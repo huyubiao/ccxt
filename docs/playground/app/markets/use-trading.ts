@@ -8,7 +8,7 @@ import type { TestOrderRequest, Trade, TradingAccountRequest, TradingStatus } fr
 const statusEndpoint = apiUrl("/api/trading");
 const POLL_MS = 4000;
 
-async function update<T>(path: string, method: "POST" | "PUT", body: unknown, message: string): Promise<T> {
+async function update<T>(path: string, method: "POST" | "PUT" | "DELETE", body: unknown, message: string): Promise<T> {
   const response = await fetch(apiUrl(path), {
     method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     // Entry plus two protective orders can take a few seconds on a slow network.
@@ -75,6 +75,12 @@ export function useTrading() {
     run(() => update<{ trade: Trade }>("/api/trading/test-order", "POST", request, "测试策略下单失败。")), [run]);
   const closeTrade = useCallback((tradeId: string) =>
     run(() => update<{ trade: Trade }>("/api/trading/close", "POST", { tradeId }, "平仓失败。")), [run]);
+  const deleteTrades = useCallback((tradeIds: readonly string[]) =>
+    run(async () => {
+      await update("/api/trading", "DELETE", { tradeIds }, "无法删除下单记录。");
+      const removed = new Set(tradeIds);
+      setData((current) => current && { ...current, trades: current.trades.filter(({ id }) => !removed.has(id)) });
+    }), [run]);
   const changeAccount = useCallback((request: TradingAccountRequest) =>
     run(async () => {
       const message = request.action === "login" ? "无法登录币安账号。" : "无法登出币安账号。";
@@ -82,5 +88,5 @@ export function useTrading() {
       setError("");
     }), [run]);
 
-  return { mode, data, error, placeTestOrder, closeTrade, changeAccount };
+  return { mode, data, error, placeTestOrder, closeTrade, deleteTrades, changeAccount };
 }
