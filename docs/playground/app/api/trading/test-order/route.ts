@@ -1,8 +1,8 @@
-import { forwardTradingPost } from "@/lib/trading-request";
+import { forwardTradingMutation } from "@/lib/trading-request";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export function POST(request: Request) {
-  return forwardTradingPost(request, "/api/trading/test-order");
+  return forwardTradingMutation(request, "/api/trading/test-order");
 }

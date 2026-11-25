@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { isTradeActive, tradePnl, tradingModeLabels, type Trade, type TradeOrder } from "@/lib/trading-types";
+import { isTradeActive, tradePnl, tradingModeLabels, type Trade, type TradeOrder, type TradingMode } from "@/lib/trading-types";
 import { marketNumberFormatter } from "@/lib/market-number";
 import styles from "./markets.module.css";
 
@@ -18,8 +18,9 @@ const orderStatusLabels: Record<TradeOrder["status"], string> = {
   placed: "已挂单", filled: "已成交", canceled: "已撤销", triggered: "已触发", failed: "失败",
 };
 
-export default function TradeRecords({ trades, onClose }: {
+export default function TradeRecords({ trades, activeMode, onClose }: {
   trades: readonly Trade[];
+  activeMode: TradingMode;
   onClose: (tradeId: string) => Promise<unknown>;
 }) {
   const [closing, setClosing] = useState<string | null>(null);
@@ -27,7 +28,7 @@ export default function TradeRecords({ trades, onClose }: {
   const active = trades.filter(isTradeActive).length;
 
   async function close(trade: Trade) {
-    if (!window.confirm(`确认按市价平掉 ${trade.symbol}（${tradingModeLabels[trade.mode]}）？`)) return;
+    if (!window.confirm(`确认按市价平掉 ${trade.symbol} ${trade.side === "long" ? "多仓" : "空仓"}（${tradingModeLabels[trade.mode]}）？`)) return;
     setClosing(trade.id);
     setError("");
     try {
@@ -40,10 +41,11 @@ export default function TradeRecords({ trades, onClose }: {
   }
 
   return (
-    <details className={styles.turnover} open={active > 0}>
-      <summary className={styles.monitorSectionSummary}>
-        <h4>下单记录 <span>{trades.length} 条{active ? ` · ${active} 笔持仓中` : ""}</span></h4>
+    <details className={styles.monitorFeature} open={active > 0}>
+      <summary className={styles.monitorSummary}>
+        <h3>下单记录 <small>{trades.length} 条{active ? ` · ${active} 笔进行中` : ""}</small></h3>
       </summary>
+      <div className={styles.monitorBody}>
       {error && <p role="alert">{error}</p>}
       <div className={`${styles.tableScroll} ${styles.alertScroll}`}>
         <table className={styles.alertTable}>
@@ -85,7 +87,7 @@ export default function TradeRecords({ trades, onClose }: {
                 </td>
                 <td>
                   {isTradeActive(trade) && <button type="button" className={styles.tradingClose}
-                    disabled={closing !== null} onClick={() => void close(trade)}>
+                    disabled={closing !== null || activeMode !== trade.mode} onClick={() => void close(trade)}>
                     {closing === trade.id ? "平仓中…" : "市价平仓"}
                   </button>}
                 </td>
@@ -95,6 +97,7 @@ export default function TradeRecords({ trades, onClose }: {
         </table>
       </div>
       <p>盈亏按开仓价和平仓价估算，未扣手续费和资金费；止损止盈按触发价估算，实际成交价以币安为准。</p>
+      </div>
     </details>
   );
 }

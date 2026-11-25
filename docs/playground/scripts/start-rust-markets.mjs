@@ -57,11 +57,14 @@ function buildRust() {
   const architecture = { x64: "x86_64", arm64: "aarch64", ia32: "i686" }[process.arch];
   const toolchain = resolve(rustupHome, "toolchains", `stable-${architecture}-pc-windows-msvc`, "bin");
   const cargo = resolve(toolchain, "cargo.exe");
-  if (windows && !process.env.RUSTUP_HOME && !process.env.RUSTUP_TOOLCHAIN && existsSync(cargo)) {
+  const rustc = resolve(toolchain, "rustc.exe");
+  if (windows && !process.env.RUSTUP_TOOLCHAIN && existsSync(cargo) && existsSync(rustc)) {
+    const cargoHome = resolve("..", "..", "tmp", "playground-cargo");
+    console.log("使用工作区 Rust 工具链编译行情服务。");
     return start(cargo, args, { env: {
       ...process.env,
-      CARGO_HOME: process.env.CARGO_HOME || resolve("..", "..", "tmp", "playground-cargo"),
-      RUSTC: resolve(toolchain, "rustc.exe"),
+      CARGO_HOME: existsSync(cargoHome) ? cargoHome : process.env.CARGO_HOME,
+      RUSTC: rustc,
     } }).done;
   }
   return start("cargo", args).done;

@@ -2,13 +2,14 @@
 //!
 //! 策略只产出下单意图（[`OrderIntent`]），由这里统一完成：
 //! 风控检查 → 市价开仓 → 在交易所挂止损/止盈条件单 → 到期市价平仓 → 记录。
-//! 所有策略的成交都写入 `trade` 表，并在页面的「自动下单任务」里展示。
+//! 所有策略的成交都写入 `trade` 表，并在页面的「下单记录」里展示。
 //!
-//! 账户模式由环境变量决定，页面只能查看不能切换：
+//! 本机账号设置优先于环境变量：
 //! - `off`（默认）：不下单。
 //! - `demo`：币安模拟盘（Demo Trading，demo-fapi.binance.com），使用模拟盘 API Key。
 //! - `live`：币安实盘，必须额外设置确认变量，单笔金额上限默认更低。
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +19,8 @@ use ccxt_pro::exchanges::binanceusdm::BinanceusdmCore;
 use ccxt_pro::{runtime::call_typed, Config, Value as ExchangeValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{watch, Mutex};
+use sha2::{Digest, Sha256};
+use tokio::sync::{watch, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::binance::{number, outbound_proxy, Binance};
@@ -60,6 +62,20 @@ impl Side {
         }
     }
 
+    fn position_side(self) -> &'static str {
+        match self {
+            Side::Long => "LONG",
+            Side::Short => "SHORT",
+        }
+    }
+
+    fn opposite(self) -> Self {
+        match self {
+            Side::Long => Side::Short,
+            Side::Short => Side::Long,
+        }
+    }
+
     /// +1 for long, -1 for short: the sign of profit per unit of price increase.
     fn sign(self) -> f64 {
         match self {
@@ -69,7 +85,31 @@ impl Side {
     }
 }
 
-/// Account and risk settings, read once at startup.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountConfig {
+    mode: Mode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    api_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    secret: String,
+    #[serde(default)]
+    confirm_live: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum AccountChange {
+    Login {
+        #[serde(flatten)]
+        config: AccountConfig,
+    },
+    Logout {
+        #[serde(rename = "accountRevision")]
+        account_revision: String,
+    },
+}
+
 pub struct Settings {
     pub mode: Mode,
     pub max_notional: f64,
@@ -84,6 +124,37 @@ pub struct Settings {
 impl Settings {
     pub fn from_env() -> Self {
         Self::from_lookup(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
+    }
+
+    pub fn load(path: &Path) -> Self {
+        match std::fs::read(path) {
+            Ok(content) => match serde_json::from_slice::<AccountConfig>(&content) {
+                Ok(account) => Self::from_account(&account),
+                Err(_) => Self::unreadable_account(),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::from_env(),
+            Err(_) => Self::unreadable_account(),
+        }
+    }
+
+    fn unreadable_account() -> Self {
+        let mut settings = Self::from_lookup(|_| None);
+        settings.problem = Some("无法读取保存的币安账号设置，请重新配置。".into());
+        settings
+    }
+
+    fn from_account(account: &AccountConfig) -> Self {
+        Self::from_lookup(|key| match key {
+            "PLAYGROUND_TRADING_MODE" => Some(match account.mode {
+                Mode::Off => "off",
+                Mode::Demo => "demo",
+                Mode::Live => "live",
+            }.into()),
+            "BINANCE_DEMO_API_KEY" | "BINANCE_API_KEY" => Some(account.api_key.clone()).filter(|key| !key.is_empty()),
+            "BINANCE_DEMO_API_SECRET" | "BINANCE_API_SECRET" => Some(account.secret.clone()).filter(|secret| !secret.is_empty()),
+            "PLAYGROUND_LIVE_TRADING_CONFIRM" => account.confirm_live.then(|| LIVE_CONFIRMATION.into()),
+            _ => std::env::var(key).ok(),
+        })
     }
 
     fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
@@ -183,6 +254,10 @@ pub struct Trade {
     pub symbol: String,
     pub unified_symbol: String,
     pub side: Side,
+    #[serde(default)]
+    pub hedged: bool,
+    #[serde(default)]
+    account_fingerprint: Option<String>,
     pub amount: f64,
     pub notional: f64,
     pub leverage: u32,
@@ -214,6 +289,10 @@ impl Trade {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
 
+    fn public_value(&self) -> Value {
+        public_trade(self.to_value())
+    }
+
     fn order_id(&self, kind: &str) -> Option<String> {
         self.orders
             .iter()
@@ -236,11 +315,36 @@ impl Trade {
 
 type TradeResult<T> = Result<T, String>;
 
-pub struct Trader {
+fn public_trade(mut trade: Value) -> Value {
+    if let Some(record) = trade.as_object_mut() {
+        record.remove("accountFingerprint");
+    }
+    trade
+}
+
+struct Account {
     settings: Settings,
+    exchange: Option<Mutex<BinanceusdmCore>>,
+    revision: Uuid,
+    fingerprint: Option<String>,
+}
+
+impl Account {
+    fn new(settings: Settings) -> Self {
+        let exchange = settings.enabled().then(|| Mutex::new(trading_client(&settings)));
+        let fingerprint = exchange.as_ref().map(|_| format!("{:x}", Sha256::digest(settings.api_key.as_bytes())));
+        Self { settings, exchange, revision: Uuid::new_v4(), fingerprint }
+    }
+
+    fn matches_key(&self, fingerprint: Option<&str>) -> bool {
+        fingerprint.is_none_or(|value| self.fingerprint.as_deref() == Some(value))
+    }
+}
+
+pub struct Trader {
+    account: RwLock<Account>,
     store: Arc<Store>,
     market_data: Arc<Binance>,
-    exchange: Option<Mutex<BinanceusdmCore>>,
     /// Serializes submit / close / periodic checks so one trade is never handled twice.
     operations: Mutex<()>,
     balance: Mutex<Option<(i64, Value)>>,
@@ -248,40 +352,84 @@ pub struct Trader {
 
 impl Trader {
     pub fn new(settings: Settings, store: Arc<Store>, market_data: Arc<Binance>) -> Self {
-        let exchange = settings.enabled().then(|| Mutex::new(trading_client(&settings)));
         Self {
-            settings,
+            account: RwLock::new(Account::new(settings)),
             store,
             market_data,
-            exchange,
             operations: Mutex::new(()),
             balance: Mutex::new(None),
         }
     }
 
-    pub fn settings(&self) -> &Settings {
-        &self.settings
+    pub async fn change_account(&self, change: AccountChange) -> TradeResult<()> {
+        let _operation = self.operations.lock().await;
+        let mut account = self.account.write().await;
+        let config = match change {
+            AccountChange::Login { mut config } => {
+                if account.settings.enabled() {
+                    return Err("已登录币安账号，请先登出再登录其他账号。".into());
+                }
+                if config.mode == Mode::Off {
+                    return Err("登录时请选择模拟盘或实盘。".into());
+                }
+                config.api_key = config.api_key.trim().to_owned();
+                config.secret = config.secret.trim().to_owned();
+                if config.api_key.len() > 256 || config.secret.len() > 256 {
+                    return Err("API Key 或 Secret 格式无效。".into());
+                }
+                config
+            }
+            AccountChange::Logout { account_revision } => {
+                if Uuid::parse_str(&account_revision).ok() != Some(account.revision) {
+                    return Err("币安账号状态已变化，请刷新后重试。".into());
+                }
+                AccountConfig {
+                    mode: Mode::Off, api_key: String::new(), secret: String::new(), confirm_live: false,
+                }
+            }
+        };
+        let settings = Settings::from_account(&config);
+        if let Some(problem) = &settings.problem {
+            return Err(problem.clone());
+        }
+        if !self.store.active_trades().map_err(|_| "无法读取进行中的交易。")?.is_empty() {
+            return Err("还有进行中的策略交易，结束后才能登录或登出币安账号。".into());
+        }
+        let next = Account::new(settings);
+        if let Some(exchange) = &next.exchange {
+            let mut core = exchange.lock().await;
+            require_hedge_mode(&mut core).await?;
+        }
+        crate::store::write_private_json(&self.store.trading_account_path(), &config)
+            .map_err(|_| "无法保存币安账号设置。")?;
+        *account = next;
+        self.invalidate_balance().await;
+        Ok(())
     }
 
     /// Account summary and recent trades for the page.
     pub async fn status(&self) -> Value {
-        let trades = self.store.recent_trades(HISTORY_LIMIT).unwrap_or_default();
+        let trades: Vec<_> = self.store.recent_trades(HISTORY_LIMIT).unwrap_or_default()
+            .into_iter().map(public_trade).collect();
+        let account = self.account.read().await;
+        let settings = &account.settings;
         json!({
-            "mode": self.settings.mode,
-            "enabled": self.settings.enabled(),
-            "problem": self.settings.problem,
+            "mode": settings.mode,
+            "accountRevision": account.revision.to_string(),
+            "enabled": settings.enabled(),
+            "problem": settings.problem,
             "limits": {
-                "maxNotional": self.settings.max_notional,
-                "maxOpenTrades": self.settings.max_open_trades,
-                "maxLeverage": self.settings.max_leverage,
+                "maxNotional": settings.max_notional,
+                "maxOpenTrades": settings.max_open_trades,
+                "maxLeverage": settings.max_leverage,
             },
-            "balance": self.balance().await,
+            "balance": self.balance(account.exchange.as_ref()).await,
             "trades": trades,
         })
     }
 
-    async fn balance(&self) -> Value {
-        let Some(exchange) = &self.exchange else {
+    async fn balance(&self, exchange: Option<&Mutex<BinanceusdmCore>>) -> Value {
+        let Some(exchange) = exchange else {
             return Value::Null;
         };
         let mut cache = self.balance.lock().await;
@@ -321,25 +469,31 @@ impl Trader {
 
     /// Places a trade for a strategy: risk checks, market entry, exchange-side
     /// stop-loss and take-profit. Returns the stored trade.
-    pub async fn submit(&self, intent: OrderIntent) -> TradeResult<Value> {
-        let Some(exchange) = &self.exchange else {
-            return Err(self
-                .settings
+    pub async fn submit(&self, intent: OrderIntent, account_revision: Uuid) -> TradeResult<Value> {
+        let _operation = self.operations.lock().await;
+        let account = self.account.read().await;
+        if account_revision != account.revision {
+            return Err("币安账号设置已更新，请核对当前账号后重新确认下单。".into());
+        }
+        let settings = &account.settings;
+        let Some(exchange) = &account.exchange else {
+            return Err(settings
                 .problem
                 .clone()
-                .unwrap_or_else(|| "交易未开启：请设置 PLAYGROUND_TRADING_MODE=demo 或 live。".into()));
+                .unwrap_or_else(|| "交易未开启，请在「账号设置」中连接币安。".into()));
         };
-        self.check_intent(&intent)?;
-        let _operation = self.operations.lock().await;
+        Self::check_intent(settings, &intent)?;
         let active = self.store.active_trades().map_err(|_| "无法读取进行中的交易。")?;
-        if active.len() >= self.settings.max_open_trades {
+        let account_trades = active.iter().filter(|trade| trade["mode"] == json!(settings.mode)
+            && account.matches_key(trade["accountFingerprint"].as_str()));
+        if account_trades.clone().count() >= settings.max_open_trades {
             return Err(format!(
                 "进行中的交易已达上限 {} 笔（PLAYGROUND_MAX_OPEN_TRADES）。",
-                self.settings.max_open_trades
+                settings.max_open_trades
             ));
         }
-        if active.iter().any(|trade| trade["symbol"] == intent.symbol.as_str()) {
-            return Err(format!("{} 已有进行中的交易，同一合约同一时间只允许一个策略持仓。", intent.symbol));
+        if account_trades.clone().any(|trade| blocks_entry(trade, &intent)) {
+            return Err(format!("{} 已有同方向或旧单向持仓的策略交易。", intent.symbol));
         }
         let contract = self
             .market_data
@@ -358,34 +512,37 @@ impl Trader {
             return Err(format!("交易客户端中找不到 {unified}。"));
         }
 
-        let dual: Value = raw(typed(core.fapi_private_get_position_side_dual(&[empty()])).await?)?;
-        if dual["dualSidePosition"] == true {
-            return Err("账户处于双向持仓模式，请在币安合约设置中切换为单向持仓后再试。".into());
-        }
-        if position_amount(&mut core, &intent.symbol).await?.abs() > 0.0 {
+        require_hedge_mode(&mut core).await?;
+        let positions = position_rows(&mut core, &intent.symbol).await?;
+        if position_value(&positions, &intent.symbol, intent.side.position_side(), "positionAmt").abs() > 0.0 {
             return Err(format!(
-                "{} 在交易所已有持仓（可能是手动开的），为避免互相干扰，本次不下单。",
+                "{} 在交易所已有同方向持仓，本次不下单。",
                 intent.symbol
             ));
         }
+        let opposite = intent.side.opposite().position_side();
+        let opposite_orders = check_open_orders(&mut core, &intent.symbol, intent.side).await?;
+        let shared_leverage = account_trades.clone().any(|trade| trade["symbol"] == intent.symbol.as_str())
+            || position_value(&positions, &intent.symbol, opposite, "positionAmt").abs() > 0.0
+            || opposite_orders;
         let mark = mark_price(&mut core, &intent.symbol).await?;
         let amount = order_amount(&core, &unified, &market, intent.notional, mark)?;
 
-        raw(typed(core
-            .fapi_private_post_leverage(&[ExchangeValue::from_json(&json!({"symbol": intent.symbol, "leverage": intent.leverage}))])).await?)
-        .map_err(|error| format!("设置杠杆失败：{error}"))?;
+        set_entry_leverage(&mut core, &intent, shared_leverage).await?;
 
         let now = now_ms();
         let mut trade = Trade {
-            id: format!("{}-{}-{}", intent.strategy_id, intent.symbol, now),
+            id: Uuid::new_v4().to_string(),
             strategy: StrategyRef {
                 id: intent.strategy_id.clone(),
                 name: intent.strategy_name.clone(),
             },
-            mode: self.settings.mode,
+            mode: settings.mode,
             symbol: intent.symbol.clone(),
             unified_symbol: unified.clone(),
             side: intent.side,
+            hedged: true,
+            account_fingerprint: account.fingerprint.clone(),
             amount,
             notional: amount * mark,
             leverage: intent.leverage,
@@ -412,7 +569,7 @@ impl Trader {
             &unified,
             intent.side.entry(),
             amount,
-            json!({"newClientOrderId": &client_id[..client_id.len().min(36)]}),
+            json!({"newClientOrderId": &client_id[..client_id.len().min(36)], "positionSide": intent.side.position_side()}),
         )
         .await;
         let entry = match entry {
@@ -428,7 +585,9 @@ impl Trader {
         };
         let entry_price = match number(&entry["average"]).filter(|price| *price > 0.0) {
             Some(price) => price,
-            None => position_entry(&mut core, &intent.symbol).await.unwrap_or(mark),
+            None => position_rows(&mut core, &intent.symbol).await.ok()
+                .map(|rows| position_value(&rows, &intent.symbol, intent.side.position_side(), "entryPrice"))
+                .filter(|price| *price > 0.0).unwrap_or(mark),
         };
         trade.orders.push(order_record("entry", intent.side.entry(), amount, None, &entry, "filled"));
         trade.entry_price = Some(entry_price);
@@ -447,7 +606,7 @@ impl Trader {
             ("stop-loss", "stopLossPrice", stop_loss),
             ("take-profit", "takeProfitPrice", take_profit),
         ] {
-            let params = json!({key: price, "reduceOnly": true, "workingType": "MARK_PRICE"});
+            let params = json!({key: price, "positionSide": intent.side.position_side(), "workingType": "MARK_PRICE"});
             match place(&mut core, &unified, intent.side.exit(), amount, params).await {
                 Ok(order) => trade
                     .orders
@@ -465,18 +624,19 @@ impl Trader {
         if let Some(error) = protection_error {
             // Never leave an unprotected position behind.
             self.close_locked(&mut core, &mut trade, "保护单失败，已市价平仓").await;
-            trade.status = "failed".into();
-            trade.error = Some(error.clone());
+            if trade.status == "closed" {
+                trade.status = "failed".into();
+            }
+            trade.error = Some(trade.error.as_ref().map_or_else(|| error.clone(), |close| format!("{error}；{close}")));
             self.save(&trade)?;
             return Err(error);
         }
         drop(core);
         self.invalidate_balance().await;
-        Ok(trade.to_value())
+        Ok(trade.public_value())
     }
 
-    fn check_intent(&self, intent: &OrderIntent) -> TradeResult<()> {
-        let settings = &self.settings;
+    fn check_intent(settings: &Settings, intent: &OrderIntent) -> TradeResult<()> {
         if !intent.notional.is_finite() || intent.notional <= 0.0 {
             return Err("下单金额必须大于 0。".into());
         }
@@ -514,11 +674,15 @@ impl Trader {
 
     /// Manually closes one open trade at market.
     pub async fn close(&self, id: &str) -> TradeResult<Value> {
-        let Some(exchange) = &self.exchange else {
+        let _operation = self.operations.lock().await;
+        let account = self.account.read().await;
+        let Some(exchange) = &account.exchange else {
             return Err("交易未开启。".into());
         };
-        let _operation = self.operations.lock().await;
         let mut trade = self.load(id)?;
+        if trade.mode != account.settings.mode || !account.matches_key(trade.account_fingerprint.as_deref()) {
+            return Err("请用这笔交易原来的账户处理平仓。".into());
+        }
         if !matches!(trade.status.as_str(), "opening" | "open" | "closing") {
             return Err("这笔交易已经结束。".into());
         }
@@ -526,15 +690,19 @@ impl Trader {
         self.close_locked(&mut core, &mut trade, "手动平仓").await;
         drop(core);
         self.invalidate_balance().await;
-        Ok(trade.to_value())
+        if trade.status == "closing" {
+            return Err(trade.error.unwrap_or_else(|| "平仓尚未完成。".into()));
+        }
+        Ok(trade.public_value())
     }
 
     /// One pass over active trades: detect exchange-side exits and close expired trades.
     pub async fn check(&self) {
-        let Some(exchange) = &self.exchange else {
+        let _operation = self.operations.lock().await;
+        let account = self.account.read().await;
+        let Some(exchange) = &account.exchange else {
             return;
         };
-        let _operation = self.operations.lock().await;
         let Ok(active) = self.store.active_trades() else {
             return;
         };
@@ -542,12 +710,12 @@ impl Trader {
             let Ok(mut trade) = serde_json::from_value::<Trade>(row) else {
                 continue;
             };
-            if trade.mode != self.settings.mode {
+            if trade.mode != account.settings.mode || !account.matches_key(trade.account_fingerprint.as_deref()) {
                 // A trade from the other account cannot be managed with these keys.
                 continue;
             }
             let mut core = exchange.lock().await;
-            let Ok(position) = position_amount(&mut core, &trade.symbol).await else {
+            let Ok(position) = trade_position(&mut core, &trade).await else {
                 continue;
             };
             if position.abs() == 0.0 {
@@ -559,7 +727,7 @@ impl Trader {
                     continue;
                 }
                 self.finish_exchange_exit(&mut core, &mut trade).await;
-            } else if now_ms() >= trade.deadline {
+            } else if trade.status == "closing" || now_ms() >= trade.deadline {
                 self.close_locked(&mut core, &mut trade, "持仓到期，市价平仓").await;
             }
         }
@@ -598,7 +766,7 @@ impl Trader {
         let _ = self.save(trade);
         cancel_trigger(core, trade, "stop-loss").await;
         cancel_trigger(core, trade, "take-profit").await;
-        let remaining = match position_amount(core, &trade.symbol).await {
+        let remaining = match trade_position(core, trade).await {
             Ok(amount) => amount,
             Err(error) => {
                 trade.error = Some(format!("平仓前读取持仓失败：{error}"));
@@ -607,16 +775,16 @@ impl Trader {
             }
         };
         if remaining.abs() > 0.0 {
-            let side = if remaining > 0.0 { "sell" } else { "buy" };
-            match place(core, &trade.unified_symbol, side, remaining.abs(), json!({"reduceOnly": true})).await {
+            let (side, amount, params) = closing_order(trade, remaining);
+            match place(core, &trade.unified_symbol, side, amount, params).await {
                 Ok(order) => {
                     trade.exit_price = number(&order["average"]).filter(|price| *price > 0.0);
                     trade
                         .orders
-                        .push(order_record("exit", side, remaining.abs(), None, &order, "filled"));
+                        .push(order_record("exit", side, amount, None, &order, "filled"));
                 }
                 Err(error) => {
-                    trade.orders.push(failed_order("exit", side, remaining.abs(), None, &error));
+                    trade.orders.push(failed_order("exit", side, amount, None, &error));
                     trade.error = Some(format!("平仓失败，请到币安手动处理：{error}"));
                     let _ = self.save(trade);
                     return;
@@ -651,9 +819,6 @@ impl Trader {
 
 /// Background loop: checks active trades every few seconds until shutdown.
 pub async fn supervise(trader: Arc<Trader>, mut stop: watch::Receiver<bool>) {
-    if !trader.settings.enabled() {
-        return;
-    }
     while !*stop.borrow() {
         trader.check().await;
         tokio::select! {
@@ -695,20 +860,11 @@ fn readable(error: &ccxt_pro::ExchangeError) -> String {
             }
         }
     }
-    if message.is_empty() {
-        error.kind.clone()
-    } else {
-        format!("{}: {message}", error.kind)
-    }
+    error.kind.clone()
 }
 
 fn empty() -> ExchangeValue {
     ExchangeValue::from_json(&json!({}))
-}
-
-/// Raw endpoint responses arrive as exchange values; errors are already mapped.
-fn raw(value: ExchangeValue) -> TradeResult<Value> {
-    Ok(value.to_json())
 }
 
 async fn typed(future: impl std::future::Future<Output = ExchangeValue>) -> TradeResult<ExchangeValue> {
@@ -766,23 +922,71 @@ async fn position_rows(core: &mut BinanceusdmCore, symbol: &str) -> TradeResult<
     }
 }
 
-/// Signed position size (positive long, negative short) in one-way mode.
-async fn position_amount(core: &mut BinanceusdmCore, symbol: &str) -> TradeResult<f64> {
-    Ok(position_rows(core, symbol)
-        .await?
-        .iter()
-        .filter(|row| row["symbol"] == symbol)
-        .filter_map(|row| number(&row["positionAmt"]))
-        .sum())
+fn blocks_entry(trade: &Value, intent: &OrderIntent) -> bool {
+    trade["symbol"] == intent.symbol.as_str()
+        && (trade["hedged"] != true || trade["side"] == json!(intent.side))
 }
 
-async fn position_entry(core: &mut BinanceusdmCore, symbol: &str) -> TradeResult<f64> {
-    position_rows(core, symbol)
-        .await?
+fn position_value(rows: &[Value], symbol: &str, side: &str, field: &str) -> f64 {
+    rows
         .iter()
-        .filter(|row| row["symbol"] == symbol)
-        .find_map(|row| number(&row["entryPrice"]).filter(|price| *price > 0.0))
-        .ok_or_else(|| "无法读取开仓均价。".into())
+        .find(|row| row["symbol"] == symbol && row["positionSide"] == side)
+        .and_then(|row| number(&row[field]))
+        .unwrap_or_default()
+}
+
+async fn trade_position(core: &mut BinanceusdmCore, trade: &Trade) -> TradeResult<f64> {
+    let side = if trade.hedged { trade.side.position_side() } else { "BOTH" };
+    Ok(position_value(&position_rows(core, &trade.symbol).await?, &trade.symbol, side, "positionAmt"))
+}
+
+fn closing_order(trade: &Trade, remaining: f64) -> (&'static str, f64, Value) {
+    if trade.hedged {
+        (trade.side.exit(), remaining.abs().min(trade.amount), json!({"positionSide": trade.side.position_side()}))
+    } else {
+        let order_side = if remaining > 0.0 { "sell" } else { "buy" };
+        (order_side, remaining.abs(), json!({"reduceOnly": true}))
+    }
+}
+
+async fn require_hedge_mode(core: &mut BinanceusdmCore) -> TradeResult<()> {
+    let config = typed(core.fapi_private_get_position_side_dual(&[empty()])).await?.to_json();
+    if config["dualSidePosition"] != true {
+        return Err("请在币安 USDⓈ-M 合约设置中启用双向持仓。".into());
+    }
+    Ok(())
+}
+
+async fn check_open_orders(core: &mut BinanceusdmCore, symbol: &str, side: Side) -> TradeResult<bool> {
+    let query = [ExchangeValue::from_json(&json!({"symbol": symbol}))];
+    let orders = typed(core.fapi_private_get_open_orders(&query)).await?.to_json();
+    let triggers = typed(core.fapi_private_get_open_algo_orders(&query)).await?.to_json();
+    let orders = orders.as_array().ok_or("无法读取未成交订单。")?;
+    let triggers = triggers.as_array().ok_or("无法读取未成交条件单。")?;
+    let pending = orders.iter().chain(triggers);
+    if pending.clone().any(|order| order["positionSide"] == side.position_side()) {
+        return Err(format!("{symbol} 有同方向未成交订单，请核对后再下单。"));
+    }
+    Ok(pending.into_iter().any(|order| order["positionSide"] == side.opposite().position_side()))
+}
+
+async fn set_entry_leverage(core: &mut BinanceusdmCore, intent: &OrderIntent, shared: bool) -> TradeResult<()> {
+    if shared {
+        let query = [ExchangeValue::from_json(&json!({"symbol": intent.symbol}))];
+        let config = typed(core.fapi_private_get_symbol_config(&query)).await?.to_json();
+        let leverage = config.as_array()
+            .and_then(|rows| rows.iter().find(|row| row["symbol"] == intent.symbol.as_str()))
+            .and_then(|row| number(&row["leverage"]))
+            .ok_or("无法核对合约当前杠杆。")?;
+        if leverage != f64::from(intent.leverage) {
+            return Err(format!("同一合约的多仓和空仓共用杠杆，请使用当前的 {leverage} 倍杠杆。"));
+        }
+    } else {
+        typed(core.fapi_private_post_leverage(&[ExchangeValue::from_json(&json!({
+            "symbol": intent.symbol, "leverage": intent.leverage
+        }))])).await.map_err(|error| format!("设置杠杆失败：{error}"))?;
+    }
+    Ok(())
 }
 
 async fn mark_price(core: &mut BinanceusdmCore, symbol: &str) -> TradeResult<f64> {
@@ -935,8 +1139,6 @@ mod tests {
             ("BINANCE_DEMO_API_SECRET", "s"),
             ("PLAYGROUND_MAX_LEVERAGE", "20"),
         ]);
-        let store = Arc::new(Store::open_memory().unwrap());
-        let trader = Trader::new(trader_settings, store, Arc::new(Binance::new()));
         let mut intent = OrderIntent {
             strategy_id: "test".into(),
             strategy_name: "测试策略".into(),
@@ -949,11 +1151,29 @@ mod tests {
             max_hold_seconds: 600,
             note: String::new(),
         };
-        assert!(trader.check_intent(&intent).unwrap_err().contains("强平"));
+        assert!(Trader::check_intent(&trader_settings, &intent).unwrap_err().contains("强平"));
         intent.stop_loss_percent = 2.0;
-        assert!(trader.check_intent(&intent).is_ok());
+        assert!(Trader::check_intent(&trader_settings, &intent).is_ok());
         intent.notional = 1_000.0;
-        assert!(trader.check_intent(&intent).unwrap_err().contains("上限"));
+        assert!(Trader::check_intent(&trader_settings, &intent).unwrap_err().contains("上限"));
+    }
+
+    #[tokio::test]
+    async fn a_changed_account_rejects_an_order_before_contacting_binance() {
+        let trader = Trader::new(settings(&[]), Arc::new(Store::open_memory().unwrap()), Arc::new(Binance::new()));
+        let intent = OrderIntent {
+            strategy_id: "test".into(), strategy_name: "测试策略".into(), symbol: "BTCUSDT".into(),
+            side: Side::Long, notional: 20.0, leverage: 2, stop_loss_percent: 1.0,
+            take_profit_percent: 1.0, max_hold_seconds: 300, note: String::new(),
+        };
+        assert!(!blocks_entry(&json!({"symbol":"BTCUSDT","hedged":true,"side":"short"}), &intent));
+        assert!(blocks_entry(&json!({"symbol":"BTCUSDT","hedged":true,"side":"long"}), &intent));
+        assert!(blocks_entry(&json!({"symbol":"BTCUSDT","side":"short"}), &intent));
+        let error = trader.submit(intent, Uuid::new_v4()).await.unwrap_err();
+        assert!(error.contains("账号设置已更新"));
+        let status = trader.status().await;
+        assert!(!status.to_string().contains("apiKey"));
+        assert!(!status.to_string().contains("secret"));
     }
 
     #[test]
@@ -966,6 +1186,8 @@ mod tests {
             symbol: "BTCUSDT".into(),
             unified_symbol: "BTC/USDT:USDT".into(),
             side: Side::Short,
+            hedged: true,
+            account_fingerprint: Some("test fingerprint".into()),
             amount: 0.002,
             notional: 200.0,
             leverage: 3,
@@ -988,7 +1210,81 @@ mod tests {
         let active = store.active_trades().unwrap();
         assert_eq!(active.len(), 1);
         let loaded: Trade = serde_json::from_value(active[0].clone()).unwrap();
+        assert!(loaded.public_value().get("accountFingerprint").is_none());
         assert_eq!(loaded.side, Side::Short);
         assert_eq!(loaded.mode, Mode::Demo);
+        let (side, amount, params) = closing_order(&loaded, -0.004);
+        assert_eq!((side, amount), ("buy", 0.002));
+        assert_eq!(params, json!({"positionSide":"SHORT"}));
+        let mut legacy = trade.to_value();
+        legacy.as_object_mut().unwrap().remove("hedged");
+        let legacy: Trade = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.hedged);
+        assert_eq!(closing_order(&legacy, -0.002).2, json!({"reduceOnly":true}));
+    }
+
+    #[test]
+    fn hedge_position_selection_keeps_long_and_short_separate() {
+        let rows = vec![
+            json!({"symbol":"BTCUSDT","positionSide":"LONG","positionAmt":"0.01"}),
+            json!({"symbol":"BTCUSDT","positionSide":"SHORT","positionAmt":"-0.01"}),
+        ];
+        assert_eq!(position_value(&rows, "BTCUSDT", "LONG", "positionAmt"), 0.01);
+        assert_eq!(position_value(&rows, "BTCUSDT", "SHORT", "positionAmt"), -0.01);
+        assert_eq!(position_value(&rows, "BTCUSDT", "BOTH", "positionAmt"), 0.0);
+    }
+
+    #[test]
+    fn page_configuration_requires_specific_keys_and_live_confirmation() {
+        let config = |value| serde_json::from_value::<AccountConfig>(value).unwrap();
+        let live = config(json!({"mode":"live","apiKey":"key","secret":"secret"}));
+        assert!(!Settings::from_account(&live).enabled());
+        let demo = config(json!({"mode":"demo","apiKey":"key","secret":"secret"}));
+        assert!(Settings::from_account(&demo).enabled());
+        let missing = config(json!({"mode":"demo","apiKey":"key"}));
+        assert!(!Settings::from_account(&missing).enabled());
+    }
+
+    #[tokio::test]
+    async fn a_logged_in_account_rejects_reconfiguration_and_stale_logout() {
+        let settings = settings(&[
+            ("PLAYGROUND_TRADING_MODE", "demo"),
+            ("BINANCE_DEMO_API_KEY", "fixture-key"),
+            ("BINANCE_DEMO_API_SECRET", "fixture-secret"),
+        ]);
+        let trader = Trader::new(settings, Arc::new(Store::open_memory().unwrap()), Arc::new(Binance::new()));
+        for mode in ["demo", "live"] {
+            let login = serde_json::from_value(json!({
+                "action": "login", "mode": mode, "apiKey": "new-key", "secret": "new-secret", "confirmLive": true,
+            })).unwrap();
+            assert!(trader.change_account(login).await.unwrap_err().contains("请先登出"));
+        }
+        let logout = AccountChange::Logout { account_revision: Uuid::new_v4().to_string() };
+        assert!(trader.change_account(logout).await.unwrap_err().contains("状态已变化"));
+        assert_eq!(trader.account.read().await.settings.api_key, "fixture-key");
+    }
+
+    #[tokio::test]
+    async fn logout_clears_persisted_credentials_and_keeps_trading_off_after_restart() {
+        let directory = std::env::temp_dir().join(format!("playground-logout-{}", Uuid::new_v4()));
+        let database = directory.join("monitor.sqlite");
+        let store = Arc::new(Store::open(&database).unwrap());
+        let path = store.trading_account_path();
+        crate::store::write_private_json(&path, &json!({
+            "mode": "demo", "apiKey": "fixture-key", "secret": "fixture-secret",
+        })).unwrap();
+        let trader = Trader::new(Settings::load(&path), store, Arc::new(Binance::new()));
+        let revision = trader.account.read().await.revision.to_string();
+        trader.change_account(AccountChange::Logout {
+            account_revision: revision,
+        }).await.unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["mode"], "off");
+        assert!(saved.get("apiKey").is_none() && saved.get("secret").is_none());
+        assert!(!Settings::load(&path).enabled());
+        drop(trader);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(database).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

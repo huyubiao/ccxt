@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_WINDOW_SECONDS: u32 = 10;
 pub const MAX_WINDOW_SECONDS: u32 = 300;
-pub const MARKET_SPIKE_NAME: &str = "异动监控";
+pub const MARKET_SPIKE_NAME: &str = "异动监控策略";
 const MIN_PERCENT: f64 = 2.0;
 const MAX_PERCENT: f64 = 100.0;
 const MIN_TURNOVER_MULTIPLE: f64 = 2.0;

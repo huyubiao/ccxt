@@ -1,7 +1,7 @@
 export const AUTO_ORDER_WATCH_MS = 60 * 60_000;
 export const AUTO_ORDER_SYMBOL_LIMIT = 20;
 export const AUTO_ORDER_HISTORY_LIMIT = 100;
-export const marketSpikeStrategy = { id: "market-spike", name: "异动监控" };
+export const marketSpikeStrategy = { id: "market-spike", name: "异动监控策略" };
 
 type Strategy = { id: string; name: string };
 export type AutoOrderSignal = { strategy: Strategy; symbol: string; time: number };

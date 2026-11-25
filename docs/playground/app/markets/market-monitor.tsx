@@ -2,10 +2,6 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { mergeAlertHistory, readSpikeRecords, retainSpikeRecords, saveSpikeRecords } from "@/lib/alert-history";
-import {
-  AUTO_ORDER_HISTORY_LIMIT, autoOrderKey, autoOrderRequestKey, autoOrderWatchKey, createAutoOrderMonitor, isAutoOrderActive, marketSpikeStrategy,
-  type AutoOrderRequest, type AutoOrderWatch, type AutoOrderWatchIdentity,
-} from "@/lib/auto-order";
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
 import {
@@ -20,9 +16,9 @@ import { createMarketSpikeEvent } from "@/lib/strategy-notification-events";
 import { useBackgroundMonitor } from "./use-background-monitor";
 import type { BackgroundRule } from "@/lib/background-monitor-types";
 import AlertRecords from "./alert-records";
-import AutoOrders, { StrategyOrderRequests } from "./auto-orders";
 import { useStrategyNotifications } from "./use-strategy-notifications";
 import DingTalkSettings from "./dingtalk-settings";
+import BinanceSettings from "./binance-settings";
 import TestStrategy from "./test-strategy";
 import TradeRecords from "./trade-records";
 import { useTrading } from "./use-trading";
@@ -71,36 +67,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [turnoverMultiple, setTurnoverMultiple] = useState(DEFAULT_TURNOVER_MULTIPLE);
   const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | null>(null);
   const [spikes, setSpikes] = useState<SpikeRecord[]>([]);
-  const [browserOrders, setBrowserOrders] = useState<AutoOrderWatch[]>([]);
-  const deletedBrowserOrders = useRef(new Set<string>());
-  const [browserRequests, setBrowserRequests] = useState<AutoOrderRequest[]>([]);
-  const seenRequests = useRef(new Set<string>());
-  const [autoOrders] = useState(() => createAutoOrderMonitor((symbol, report, fail) => {
-    const worker = new Worker(new URL("./auto-order.worker.ts", import.meta.url), { name: symbol, type: "module" });
-    worker.onmessage = (event) => report(event.data);
-    worker.onerror = fail;
-    worker.onmessageerror = fail;
-    return { quote: (tick) => worker.postMessage(tick), stop: () => worker.terminate() };
-  }, (watch) => {
-    if (deletedBrowserOrders.current.has(autoOrderWatchKey(watch))) return;
-    const key = autoOrderKey(watch);
-    setBrowserOrders((current) => {
-      const records = [watch, ...current.filter((row) => autoOrderKey(row) !== key)];
-      const active = records.filter(isAutoOrderActive).length;
-      return records.sort((a, b) => Number(isAutoOrderActive(b)) - Number(isAutoOrderActive(a)) || b.time - a.time)
-        .slice(0, Math.max(AUTO_ORDER_HISTORY_LIMIT, active));
-    });
-  }, (request) => {
-    const key = autoOrderRequestKey(request);
-    if (seenRequests.current.has(key)) return false;
-    seenRequests.current.add(key);
-    setBrowserRequests((current) => {
-      const recent = [request, ...current.filter(({ strategyId }) => strategyId === request.strategyId)]
-        .sort((a, b) => b.time - a.time).slice(0, AUTO_ORDER_HISTORY_LIMIT);
-      return [...current.filter(({ strategyId }) => strategyId !== request.strategyId), ...recent];
-    });
-    return true;
-  }));
   const [recordsReady, setRecordsReady] = useState(false);
   const background = useBackgroundMonitor();
   const trading = useTrading();
@@ -207,8 +173,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     if (recordsReady) saveSpikeRecords(spikes);
   }, [recordsReady, spikes]);
 
-  useEffect(() => () => autoOrders.stop(), [autoOrders]);
-
   useEffect(() => {
     if (!hasSymbols) return;
     const lifecycle = new AbortController();
@@ -241,7 +205,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     function confirmAlert(record: SpikeRecord & { volume: AlertVolume }, latestPrice?: number) {
       if (!activeSymbols.current?.has(record.symbol)) return;
       const event = createMarketSpikeEvent(record, record.volume, latestPrice);
-      autoOrders.submit({ strategy: marketSpikeStrategy, symbol: event.symbol, time: event.time });
       if (notifyDingTalk.current) notifyStrategy(event);
     }
 
@@ -382,7 +345,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
           if (!Number.isFinite(price) || price <= 0 || !Number.isSafeInteger(tick.E) ||
               tick.E <= (latestPrices.get(tick.s)?.eventTime ?? 0)) continue;
           latestPrices.set(tick.s, { price, eventTime: tick.E });
-          autoOrders.observe(tick.s, { time: tick.E, price });
         }
         if (latestPrices.size !== previousSize) setObservedSymbols(new Set(latestPrices.keys()));
       };
@@ -411,7 +373,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     return () => {
       lifecycle.abort();
       turnoverScope.abort();
-      autoOrders.stopStrategy(marketSpikeStrategy.id);
       clearTimeout(samplingTimer);
       clearInterval(watchdog);
       clearTimeout(reconnectTimer);
@@ -423,7 +384,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       setObservedSymbols(new Set());
       setSpikes((current) => current.map((row) => row.status === "pending" ? { ...row, status: "interrupted" } : row));
     };
-  }, [autoOrders, hasSymbols, notifyStrategy]);
+  }, [hasSymbols, notifyStrategy]);
 
   async function deleteAlertRecords(records: readonly SpikeIdentity[]) {
     if (server) await background.deleteSpikes(records);
@@ -431,19 +392,11 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     setSpikes((current) => current.filter((row) => !deleted.has(spikeKey(row))));
   }
 
-  async function deleteAutoOrderRecords(records: readonly AutoOrderWatchIdentity[]) {
-    if (server) {
-      await background.deleteAutoOrderWatches(records);
-      return;
-    }
-    const deleted = new Set(records.map(autoOrderWatchKey));
-    for (const key of deleted) deletedBrowserOrders.current.add(key);
-    setBrowserOrders((current) => current.filter((row) => !deleted.has(autoOrderWatchKey(row))));
-  }
-
   function toggleDingTalkNotifications() {
     const next = !strategyNotify;
     if (next && dingTalkConfig !== "ready") {
+      const settings = document.getElementById("account-settings");
+      if (settings instanceof HTMLDetailsElement) settings.open = true;
       document.getElementById("dingtalk-heading")?.focus();
       return;
     }
@@ -460,9 +413,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     if (!canEdit || next === strategyEnabled) return;
     const message = next
       ? server
-        ? "确定启用异动监控？启用后将按当前规则监控行情，关闭网页后仍会继续。"
-        : "确定启用异动监控？启用后将按当前规则监控行情，请保持网页打开。"
-      : "确定关闭异动监控？价格监控、待核验告警和自动下单任务会停止，已有仓位会保留。";
+        ? "确定启用异动监控策略？启用后将按当前规则监控行情，关闭网页后仍会继续。"
+        : "确定启用异动监控策略？启用后将按当前规则监控行情，请保持网页打开。"
+      : "确定关闭异动监控策略？价格监控和待核验告警会停止，已有仓位会保留。";
     if (!window.confirm(message)) return;
     if (server) {
       saveServerRule({ enabled: next });
@@ -470,7 +423,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     }
     if (!next) {
       activeSymbols.current = null;
-      autoOrders.stopStrategy(marketSpikeStrategy.id);
     }
     setEnabled(next);
     try {
@@ -545,7 +497,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const strategy = (
     <details className={styles.monitorFeature}>
       <summary className={styles.monitorSummary}>
-        <h3>异动监控 <small>{monitoringStatus}</small></h3>
+        <h3>异动监控策略 <small>{monitoringStatus}</small></h3>
       </summary>
       <div className={styles.monitorBody}>
         <div className={styles.monitorHeading}>
@@ -587,7 +539,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             </button>
           </form>
           <p id="market-spike-dingtalk-status" role="status">
-            异动监控的钉钉通知{strategyNotify ? "已开启" : "已关闭"}。
+            异动监控策略的钉钉通知{strategyNotify ? "已开启" : "已关闭"}。
             {dingTalkConfig === "ready" ? (strategyNotify ? "确认的告警将推送到钉钉群机器人。" : "")
               : dingTalkConfig === "checking" ? dingTalkConfigMessage
                 : `${dingTalkConfigMessage}。请到「钉钉推送」查看。`}
@@ -621,8 +573,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             : background.mode === "browser" ? "请保持行情页打开。" : ""}</p>
         </section>
         <AlertRecords records={history} canDelete={recordsReady && canEdit} onDelete={deleteAlertRecords} />
-        <StrategyOrderRequests strategyId={marketSpikeStrategy.id}
-          requests={server ? background.data?.autoOrderRequests ?? [] : browserRequests} />
       </div>
     </details>
   );
@@ -630,13 +580,17 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   return (
     <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
       <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
-      <DingTalkSettings {...strategyNotifications} />
+      <details id="account-settings" className={styles.monitorFeature}>
+        <summary className={styles.monitorSummary}><h3>账号设置</h3></summary>
+        <div className={`${styles.monitorBody} ${styles.accountSettingsGrid}`}>
+          <DingTalkSettings {...strategyNotifications} />
+          <BinanceSettings availability={trading.mode} status={trading.data} error={trading.error} onChange={trading.changeAccount} />
+        </div>
+      </details>
       {strategy}
       <TestStrategy mode={trading.mode} status={trading.data} error={trading.error} onSubmit={trading.placeTestOrder} />
-      <AutoOrders records={server ? background.data?.autoOrders ?? [] : browserOrders}
-        canDelete={canEdit} onDelete={deleteAutoOrderRecords}>
-        {trading.mode === "local" && <TradeRecords trades={trading.data?.trades ?? []} onClose={trading.closeTrade} />}
-      </AutoOrders>
+      <TradeRecords trades={trading.data?.trades ?? []} activeMode={trading.data?.enabled ? trading.data.mode : "off"}
+        onClose={trading.closeTrade} />
     </section>
   );
 }

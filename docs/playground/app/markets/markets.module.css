@@ -26,6 +26,8 @@
 .monitorSummary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
 .monitorFeature[open] > .monitorSummary { border-bottom: 1px solid hsl(var(--border)); }
 .monitorBody { padding: 16px; }
+.accountSettingsGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.accountSettingsGrid > section { min-width: 0; margin-bottom: 0; }
 .autoOrderTasks { margin-top: 12px; }
 .autoOrderTasks > .turnover { margin-top: 0; padding-top: 16px; border-top: 0; }
 .autoOrderTasks > .turnover > p:first-child { margin-top: 0; }
@@ -401,6 +403,7 @@
 }
 
 @media (max-width: 680px) {
+  .accountSettingsGrid { grid-template-columns: 1fr; }
   .workspace { grid-template-columns: 1fr; }
   .coins { max-height: 240px; }
 }

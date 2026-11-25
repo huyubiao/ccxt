@@ -2,13 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/basePath";
-import type { AutoOrderWatchIdentity } from "@/lib/auto-order";
 import type { BackgroundMonitorStatus, BackgroundRule } from "@/lib/background-monitor-types";
 import { readMarketResponse } from "@/lib/market-response";
 import type { SpikeIdentity } from "@/lib/price-alerts";
 
 const endpoint = apiUrl("/api/markets/background-monitor");
-type UpdateBody = BackgroundRule | readonly SpikeIdentity[] | { autoOrderWatches: readonly AutoOrderWatchIdentity[] };
+type UpdateBody = BackgroundRule | readonly SpikeIdentity[];
 
 export function useBackgroundMonitor() {
   const [mode, setMode] = useState<"loading" | "local" | "browser">("loading");
@@ -33,7 +32,7 @@ export function useBackgroundMonitor() {
           setReadError("");
           return;
         }
-        const status = await readMarketResponse<BackgroundMonitorStatus>(response, "无法读取异动监控状态。");
+        const status = await readMarketResponse<BackgroundMonitorStatus>(response, "无法读取异动监控策略状态。");
         if (request.signal.aborted) return;
         if (!updating.current) {
           setMode("local");
@@ -42,7 +41,7 @@ export function useBackgroundMonitor() {
         }
       } catch (error) {
         if (!request.signal.aborted && !updating.current) {
-          setReadError(error instanceof Error ? error.message : "无法读取异动监控状态。");
+          setReadError(error instanceof Error ? error.message : "无法读取异动监控策略状态。");
         }
       }
       if (!request.signal.aborted) timer = setTimeout(poll, 4000);
@@ -74,7 +73,7 @@ export function useBackgroundMonitor() {
   async function save(rule: BackgroundRule) {
     if (updating.current) return;
     setSaveError("");
-    const message = "无法保存异动监控设置。";
+    const message = "无法保存异动监控策略设置。";
     try {
       await update("PUT", rule, message);
     } catch (error) {
@@ -86,10 +85,6 @@ export function useBackgroundMonitor() {
     return update("DELETE", records, "无法删除告警记录。");
   }
 
-  function deleteAutoOrderWatches(records: readonly AutoOrderWatchIdentity[]) {
-    return update("DELETE", { autoOrderWatches: records }, "无法删除自动下单任务记录。");
-  }
-
   return { mode, data, saving: mutation === "PUT", deleting: mutation === "DELETE", error: saveError || readError,
-    save, deleteSpikes, deleteAutoOrderWatches };
+    save, deleteSpikes };
 }

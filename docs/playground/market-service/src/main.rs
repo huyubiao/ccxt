@@ -50,19 +50,17 @@ async fn main() -> store::Result<()> {
         .map(Arc::new);
     // Order execution needs the local database and the token-protected routes.
     let trader = store.as_ref().map(|store| {
-        Arc::new(trading::Trader::new(
-            trading::Settings::from_env(),
-            Arc::clone(store),
-            Arc::clone(&binance),
-        ))
-    });
-    if let Some(trader) = &trader {
-        let settings = trader.settings();
+        let settings = trading::Settings::load(&store.trading_account_path());
         match &settings.problem {
             Some(problem) => eprintln!("下单未开启：{problem}"),
             None => eprintln!("下单模式：{:?}，单笔上限 {} USDT", settings.mode, settings.max_notional),
         }
-    }
+        Arc::new(trading::Trader::new(
+            settings,
+            Arc::clone(store),
+            Arc::clone(&binance),
+        ))
+    });
     let app = routes::router(binance.clone(), store.clone(), notifier.clone(), trader.clone(), token)?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let trading = trader.map(|trader| tokio::spawn(trading::supervise(trader, stopped.clone())));

@@ -1,10 +1,11 @@
 import { isLocalSettingsRequest, isSameOrigin, readLocalJson } from "./local-settings-request";
 import { proxyMarketRequest } from "./market-service-proxy";
 
-/** POSTs that place or close orders: local settings mode, same origin, JSON only. */
-export async function forwardTradingPost(request: Request, route: "/api/trading/test-order" | "/api/trading/close") {
+/** Trading mutations require local settings mode, same origin and JSON. */
+export async function forwardTradingMutation(request: Request,
+  route: "/api/trading/account" | "/api/trading/test-order" | "/api/trading/close") {
   if (!isLocalSettingsRequest(request) || !isSameOrigin(request)) {
-    return Response.json({ error: "当前请求不能下单。" }, { status: 403 });
+    return Response.json({ error: "交易操作仅可在本机发起。" }, { status: 403 });
   }
   const body = await readLocalJson(request);
   if (body.status !== 200) {

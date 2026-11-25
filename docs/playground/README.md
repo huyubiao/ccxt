@@ -46,7 +46,9 @@ binary also works with the `monitor` command. A source checkout automatically
 builds the backend when the executable is missing or its Rust sources or bundled
 data snapshots are newer. This uses a current stable Rust toolchain and Windows
 C/C++ build tools. Set `PLAYGROUND_BUILD_RUST=1` before launching to force the
-source build.
+source build. When the workspace toolchain and Cargo cache are installed under
+`tmp/playground-rustup` and `tmp/playground-cargo`, the Windows launcher uses
+them. Set `RUSTUP_TOOLCHAIN` to select a different installed toolchain.
 
 To produce a Windows x64 release from the repository root with PowerShell:
 
@@ -416,11 +418,11 @@ by the mean of up to 180 preceding full trading days. The server caches a valid
 multiple until the next UTC day.
 
 Use the price monitor embedded in the market page to watch all listed Binance
-USDT perpetual contracts. **异动监控** and **告警记录** start collapsed on
+USDT perpetual contracts. **异动监控策略** and **告警记录** start collapsed on
 each page load. Monitoring starts off by default.
 Confirm the prompt after switching the strategy on or off. Turning it off
 closes the price stream and cancels pending checks.
-In local mode, turn on **异动监控 → 启用策略** to activate the Rust monitor.
+In local mode, turn on **异动监控策略 → 启用策略** to activate the Rust monitor.
 It keeps monitoring after the browser closes, for as long as the launcher
 is running. To run the saved rule independently of the web app, use
 `start-playground.cmd monitor` or `npm run monitor`. On the public
@@ -480,7 +482,7 @@ on the local market page. Paste the group robot Webhook and, if signing is
 enabled, its signing secret. Click **保存并启用**, then **发送测试消息** to check
 delivery. On the local settings page, enter up to 500 characters of custom text
 or leave the test message field blank to send the default. Then click
-**异动监控 → 开启钉钉通知** to send confirmed alerts
+**异动监控策略 → 开启钉钉通知** to send confirmed alerts
 from the monitor. Notifications start off by default.
 **停止钉钉通知** stops sending while alerts continue to appear on the page.
 Use **暂停推送** or **恢复推送** for the server-wide robot setting.
@@ -514,15 +516,21 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
 
 1. 检查风控上限，设置杠杆，市价开仓。
 2. 立刻在币安挂好止损和止盈条件单（按标记价格触发）。这样即使本服务停止，
-   仓位也有保护。如果止损或止盈单被拒绝，会立刻市价平仓，绝不留下无保护的仓位。
+   交易所仍可执行保护单。如果止损或止盈单被拒绝，服务会尝试市价平仓。
 3. 每 5 秒检查一次进行中的交易：
    - 交易所里的仓位没了，说明止损或止盈触发了，系统会撤掉另一张条件单；
    - 超过最长持仓时间的交易，会市价平仓。
 
-所有策略的交易都显示在 **自动下单任务 → 下单记录** 中，每笔进行中的交易都有
-**市价平仓** 按钮。
+策略通过统一执行层下单后，订单显示在 **交易策略 → 下单记录** 中。当前由测试策略下单，
+异动监控策略仅记录告警。当前账户进行中的交易可使用 **市价平仓** 按钮。
 
-账户在启动时由 `PLAYGROUND_TRADING_MODE` 决定，页面只显示、不能切换：
+本机页面的 **交易策略 → 账号设置** 集中配置钉钉机器人和币安账户。
+币安账户只提供模拟盘和实盘登录。登录时核对 API Key 和双向持仓设置；
+已登录时须先登出才能登录其他账号。有进行中的策略交易时须先结束交易才能登出。
+凭据以本机 JSON 文件保存，默认路径为 `.cache/market-monitor/monitor.binance-account.json`
+（相对于 `docs/playground`），自定义数据库时会随数据库路径变化。页面不回读凭据。
+文件内容未加密，Unix 下新文件权限为 `0600`，Windows 使用目录的文件访问权限。
+登出会用无凭据的状态替换该文件。仅当该文件不存在时使用以下环境变量作为后备配置：
 
 | 取值 | 含义 | 需要的环境变量 |
 | --- | --- | --- |
@@ -534,13 +542,13 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
 杠杆不超过 5 倍，可在 `.env.example` 中查看并修改。止损幅度必须小于约
 `80% × 1 / 杠杆`，确保止损在强平之前触发。其他限制：
 
-- 账户必须是单向持仓模式；
-- 同一个合约同一时间只允许一笔交易；
-- 交易所中已有持仓的合约不会下单，避免干扰手动开的仓位；
+- 币安 USDⓈ-M 账户的持仓模式须为双向。旧单向策略仓位继续按原模式管理；
+- 同一个合约允许同时管理一个多仓和一个空仓。两侧共用杠杆；
+- 同方向已有策略交易、交易所仓位或未成交订单时，拒绝该方向的新单；
 - 只能在本地模式（`start-rust-markets.mjs` 启动）下单，和后台监控使用同一个服务器令牌保护。
 
-**交易策略 → 测试策略** 用来验证整条下单链路：选择合约、方向（做多、做空，
-或「自动」：跟随上一根已收盘的 1 分钟K线方向）、金额、杠杆、止损、止盈和持仓分钟数。
+**交易策略 → 测试策略** 用来验证整条下单链路。选择合约、做多或做空，
+填写金额、杠杆、止损、止盈和持仓分钟数。
 
 新增策略时参照 `market-service/src/test_strategy.rs`：读取行情或调研指标 →
 返回一个 `OrderIntent` → 调用 `Trader::submit`。
@@ -554,10 +562,10 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
 | 文件 | 改动 | 作用 |
 | --- | --- | --- |
 | `trading.rs` | 新增 | 统一执行与风控。读取账户模式和风控上限；`OrderIntent` 下单意图；`Trader::submit` 负责风控检查 → 设杠杆 → 市价开仓 → 挂止损/止盈条件单；`Trader::check` 每 5 秒检查触发和到期；`Trader::close` 手动平仓。使用单独的交易客户端，不和行情请求抢同一把锁 |
-| `test_strategy.rs` | 新增 | 测试策略：把页面参数转成 `OrderIntent`；方向选「自动」时读取最近一根已收盘的 1 分钟K线 |
+| `test_strategy.rs` | 新增 | 把交易表单中的做多、做空和交易参数转成 `OrderIntent` |
 | `store.sql` | 修改 | 新增 `trade` 表，保存每笔交易及其全部订单（JSON） |
 | `store.rs` | 修改 | 新增 `save_trade`、`active_trades`、`trade`、`recent_trades` |
-| `routes.rs` | 修改 | 新增 `GET /api/trading`、`POST /api/trading/test-order`、`POST /api/trading/close`，都需要服务器令牌 |
+| `routes.rs` | 修改 | 交易状态、账号设置、测试下单和平仓接口都需要服务器令牌 |
 | `main.rs` | 修改 | 启动时创建 `Trader`，打印下单模式，后台运行检查循环 |
 
 **前端（Next.js）**
@@ -571,7 +579,7 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
 | `app/markets/use-trading.ts` | 新增 | 每 4 秒读取下单状态；提供下单、平仓方法 |
 | `app/markets/test-strategy.tsx` | 新增 | 「测试策略」面板：账户模式标签、余额、风控上限、下单表单和二次确认 |
 | `app/markets/trade-records.tsx` | 新增 | 「下单记录」表格：状态、止损止盈、订单明细、盈亏、市价平仓按钮 |
-| `app/markets/auto-orders.tsx` | 修改 | 自动下单任务里嵌入下单记录 |
+| `app/markets/binance-settings.tsx` | 新增 | 在本机账号设置中连接模拟盘或实盘 |
 | `app/markets/market-monitor.tsx` | 修改 | 交易策略区域挂上测试策略面板和下单记录 |
 | `app/markets/markets.module.css` | 修改 | 模拟盘/实盘标签、下拉框、平仓按钮样式 |
 
@@ -586,16 +594,8 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
 #### 配置模拟盘
 
 1. 登录 [demo.binance.com](https://demo.binance.com)，在 API 管理中创建模拟盘 API Key。模拟盘 Key 和实盘 Key 是分开的。
-2. 在模拟盘合约交易页面的设置里，把「持仓模式」设为 **单向持仓**。
-3. 在 `docs/playground/.env` 或 `.env.local` 中写入（两个文件都已被 git 忽略，不会提交）：
-
-   ```
-   PLAYGROUND_TRADING_MODE=demo
-   BINANCE_DEMO_API_KEY=你的模拟盘 Key
-   BINANCE_DEMO_API_SECRET=你的模拟盘 Secret
-   ```
-
-4. 启动：
+2. 在模拟盘 USDⓈ-M 合约设置里，把「持仓模式」设为 **双向持仓**。
+3. 启动（Windows 可直接运行仓库根目录的 `start-playground.cmd`）：
 
    ```bash
    cd docs/playground
@@ -604,7 +604,7 @@ USDT 金额、杠杆、止损 %、止盈 %、最长持仓时间），交给
    node scripts/start-rust-markets.mjs
    ```
 
-   终端出现 `下单模式：Demo，单笔上限 200 USDT` 表示配置生效；如果出现 `下单未开启：……`，按提示补全环境变量。
+4. 在本机 **交易策略 → 账号设置 → 币安账号** 选择「模拟盘」，填 Key 和 Secret 后点击 **登录**。
 
 #### 测试方法
 
@@ -636,8 +636,8 @@ curl -s -H "Host: 127.0.0.1:3000" http://127.0.0.1:3000/api/trading
 
 **第 3 步：模拟盘端到端测试**
 
-保持默认参数（DOGEUSDT、方向自动、20 USDT、2 倍、止损 1%、止盈 1%、持仓 5 分钟），点击
-**运行测试策略** 并在弹窗中确认，然后在 **自动下单任务 → 下单记录** 中逐项核对：
+选择做多或做空，核对金额、杠杆和保护参数，点击 **运行测试策略** 并在弹窗中确认。
+在 **交易策略 → 下单记录** 中逐项核对：
 
 | 测试项 | 操作 | 页面上应看到 | 币安模拟盘上应看到 |
 | --- | --- | --- | --- |
@@ -655,9 +655,9 @@ curl -s -H "Host: 127.0.0.1:3000" http://127.0.0.1:3000/api/trading
 | 金额超过单笔上限（如 5000） | 下单金额超过单笔上限 |
 | 交易对不存在（如 `NOPEUSDT`） | 不是可交易的币安 USDT 永续合约 |
 | 5 倍杠杆、止损填 20% | 止损幅度必须小于 16.00%，否则可能先被强平 |
-| 同一合约已有进行中的交易，再下一单 | 同一合约同一时间只允许一个策略持仓 |
-| 在币安上手动开了仓的合约 | 在交易所已有持仓，本次不下单 |
-| 账户为双向持仓模式 | 请在币安合约设置中切换为单向持仓 |
+| 同一合约同方向已有进行中的交易 | 已有同方向的策略交易，本次不下单 |
+| 币安上已有同方向手动仓位 | 在交易所已有同方向持仓，本次不下单 |
+| 账户为单向持仓模式 | 请在币安 USDⓈ-M 合约设置中启用双向持仓 |
 | 金额太小（低于交易所最小下单额） | 低于最小下单数量 / 最小下单金额 |
 
 **第 5 步：服务重启恢复**
@@ -679,41 +679,10 @@ curl -s -H "Host: 127.0.0.1:3000" http://127.0.0.1:3000/api/trading
 
 1. 先在模拟盘完成上面第 3、4 步的全部测试。
 2. 实盘 API Key 只开「合约交易」权限，**不要开提现**，并绑定 IP 白名单。
-3. 环境变量改为 `PLAYGROUND_TRADING_MODE=live`，填写 `BINANCE_API_KEY`、`BINANCE_API_SECRET`，
-   并设置 `PLAYGROUND_LIVE_TRADING_CONFIRM=YES_I_UNDERSTAND_REAL_MONEY`。
+3. 在实盘 USDⓈ-M 账户启用双向持仓。在 Playground 的 **账号设置** 登出旧账户后选「实盘」，
+   填实盘 Key 和 Secret，并勾选真实资金下单确认后登录。
 4. 实盘单笔上限默认 20 USDT，建议先用最小金额测试。仓库规定实盘测试每笔不得超过 25 美元。
 5. 页面显示红色「实盘」标签，下单确认弹窗会额外提示「实盘，真实资金」。
-
-### Automatic order monitoring
-
-**交易策略 → 自动下单任务** lists tasks across strategies with their
-sources. Each strategy shows its own **下单请求**. Confirmed market spike
-alerts create tasks through the monitor's `submit` method in `lib/auto-order.ts`.
-
-Strategies on the same Binance USDT perpetual share one quote worker.
-Each strategy tracks its own price range and expires after 60 minutes
-without a new confirmed signal or a qualifying order condition if its
-position is flat. The worker stops when the last strategy on that contract
-ends. The monitor exposes `updateStrategy` for reporting conditions and
-positions.
-
-Turning off **异动监控** stops its automatic order monitoring tasks and
-discards its pending task signals. Existing positions are left open. Use
-the row checkboxes or **全选** in **自动下单任务** to delete the selected
-records. A new confirmed trigger can add a fresh record for the same
-contract. Ongoing monitoring is controlled by the strategy switch.
-
-`requestOrder` records an active strategy's order request by strategy,
-contract and request ID. The strategy section shows its request history.
-Local mode saves requests to SQLite. Browser mode keeps them for the
-current page session. This stage records requests for display.
-
-Up to 20 distinct contracts can be monitored at once. Additional strategies
-can join a contract that is already monitored. A new contract over the
-limit fails immediately and writes a warning. In local mode the market
-monitor process owns the threads, records status in SQLite, and writes
-warnings to the worker log. Browser mode uses Web Workers for the current
-page session and writes warnings to the browser console.
 
 On the docs deployment at `/playground`, press **Run** (or ⌘/Ctrl+Enter) to
 execute a snippet. Switch languages with the tabs and load ready-made snippets

@@ -5,10 +5,10 @@ type RustMarketRoute = "/api/markets/contracts" | "/api/markets/alert-context" |
   "/api/markets/ticker" | "/api/markets/order-book" | "/api/markets/funding-rates" | "/api/markets/liquidations" |
   "/api/markets/volume" | "/api/markets/contract-market-caps" | "/api/markets/fundamentals" | "/api/markets/holders" |
   TradingRoute;
-type TradingRoute = "/api/trading" | "/api/trading/test-order" | "/api/trading/close";
+type TradingRoute = "/api/trading" | "/api/trading/account" | "/api/trading/test-order" | "/api/trading/close";
 const localRoutes = new Set<RustMarketRoute>([
   "/api/markets/background-monitor", "/api/strategy-notifications",
-  "/api/trading", "/api/trading/test-order", "/api/trading/close",
+  "/api/trading", "/api/trading/account", "/api/trading/test-order", "/api/trading/close",
 ]);
 
 const loopbackAgent = new Agent();

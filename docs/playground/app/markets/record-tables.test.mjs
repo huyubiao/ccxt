@@ -31,7 +31,9 @@ const hooks = registerHooks({
   },
 });
 const { default: AlertRecords } = await import("./alert-records.tsx");
-const { default: AutoOrders, StrategyOrderRequests } = await import("./auto-orders.tsx");
+const { default: TradeRecords } = await import("./trade-records.tsx");
+const { default: TestStrategy } = await import("./test-strategy.tsx");
+const { default: BinanceSettings } = await import("./binance-settings.tsx");
 hooks.deregister();
 
 const emptyRecords = { records: [], canDelete: true, onDelete: async () => {} };
@@ -40,11 +42,8 @@ const cases = [
     "全选", "交易对", "告警级别", "触发时间", "参考价/触发价 (USDT)", "当日涨跌幅度",
     "窗口涨跌幅/阈值", "窗口 (秒)", "成交额 (USDT)", "核验结果",
   ]],
-  ["自动下单任务", AutoOrders, emptyRecords, [
-    "全选", "交易对", "策略来源", "触发时间", "最新价 (USDT)", "监控区间 (USDT)", "监控状态",
-  ]],
-  ["下单请求", StrategyOrderRequests, { strategyId: "spike", requests: [{ strategyId: "other" }] }, [
-    "交易对", "请求编号", "方向", "数量", "请求时间",
+  ["下单记录", TradeRecords, { trades: [], activeMode: "off", onClose: async () => {} }, [
+    "交易对", "策略", "账户", "方向", "数量 / 金额", "开仓价", "止损 / 止盈", "状态", "盈亏 (USDT)", "开仓时间", "订单", "操作",
   ]],
 ];
 
@@ -58,3 +57,26 @@ for (const [label, Component, props, columns] of cases) {
     if (columns[0] === "全选") assert.match(html, /<input[^>]*disabled=""[^>]*>/);
   });
 }
+
+test("the test order direction menu contains long and short only", () => {
+  const html = renderToStaticMarkup(createElement(TestStrategy, { mode: "local", status: null }));
+  assert.deepEqual([...html.matchAll(/<option value="([^"]+)"/g)].map(([, value]) => value), ["long", "short"]);
+});
+
+test("the account settings only show logout while an account is connected", () => {
+  const html = renderToStaticMarkup(createElement(BinanceSettings, {
+    availability: "local", status: { mode: "live", enabled: true }, error: "",
+  }));
+  assert.match(html, /已登录 实盘/);
+  assert.match(html, />登出<\/button>/);
+  assert.doesNotMatch(html, /<select|type="password"|>登录<\/button>/);
+});
+
+test("while signed out, only demo and live can be selected for login", () => {
+  const html = renderToStaticMarkup(createElement(BinanceSettings, {
+    availability: "local", status: { mode: "off", enabled: false }, error: "",
+  }));
+  assert.match(html, />登录<\/button>/);
+  assert.deepEqual([...html.matchAll(/<option value="([^"]+)"/g)].map(([, value]) => value), ["demo", "live"]);
+  assert.equal((html.match(/type="password"/g) ?? []).length, 2);
+});

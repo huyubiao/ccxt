@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use crate::now_ms;
 use crate::strategy::MARKET_SPIKE_NAME;
@@ -134,7 +133,7 @@ impl Notifier {
         if let Err(reason) = webhook(config.webhook.as_deref().or(env_webhook.as_deref())) {
             return reason;
         }
-        if self.write_config(&config).is_err() {
+        if crate::store::write_private_json(&self.path, &config).is_err() {
             return "config-unavailable";
         }
         if config.enabled == Some(false) {
@@ -142,35 +141,6 @@ impl Notifier {
         } else {
             "ready"
         }
-    }
-
-    fn write_config(&self, config: &Config) -> crate::store::Result<()> {
-        use std::io::Write;
-        let parent = self
-            .path
-            .parent()
-            .ok_or("missing notification settings directory")?;
-        std::fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!("{}.tmp", Uuid::new_v4()));
-        let written = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            file.write_all(&serde_json::to_vec(config)?)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temporary, &self.path)?;
-            Ok(())
-        })();
-        if written.is_err() {
-            let _ = std::fs::remove_file(temporary);
-        }
-        written
     }
 
     pub async fn send(&self, message: Message) -> &'static str {
@@ -395,7 +365,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             alert.text().lines().next(),
-            Some("【异动监控】BTCUSDT 2 级告警")
+            Some("【异动监控策略】BTCUSDT 2 级告警")
         );
 
         let test = format_event(&json!({"kind": "test"})).unwrap();

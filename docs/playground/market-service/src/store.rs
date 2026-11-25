@@ -14,7 +14,33 @@ const RETENTION_MS: i64 = 30 * 86_400_000;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub struct Store(Mutex<Connection>);
+pub fn write_private_json(path: &Path, data: &impl serde::Serialize) -> Result<()> {
+    use std::io::Write;
+    let directory = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let temporary = directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let saved = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec(data)?)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if saved.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    saved
+}
+
+pub struct Store(Mutex<Connection>, PathBuf);
 
 pub struct Delivery {
     pub id: String,
@@ -35,7 +61,7 @@ impl Store {
         Self::open(Path::new(":memory:"))
     }
 
-    fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -73,7 +99,11 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(Self(Mutex::new(db)))
+        Ok(Self(Mutex::new(db), path.to_owned()))
+    }
+
+    pub fn trading_account_path(&self) -> PathBuf {
+        self.1.with_extension("binance-account.json")
     }
 
     fn db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {

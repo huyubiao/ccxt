@@ -63,6 +63,7 @@ pub fn router(
                 .post(notification_send),
         )
         .route("/api/trading", get(trading_status))
+        .route("/api/trading/account", axum::routing::put(trading_account))
         .route("/api/trading/test-order", post(trading_test_order))
         .route("/api/trading/close", post(trading_close))
         .route_layer(middleware::from_fn_with_state(token, require_local_token));
@@ -602,6 +603,31 @@ async fn trading_status(State(state): State<Service>) -> Response {
     no_store(Json(trader.status().await).into_response())
 }
 
+async fn trading_account(
+    State(state): State<Service>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Some(trader) = state.trader else {
+        return no_store(error(StatusCode::FORBIDDEN, "币安账号仅可在本机设置。"));
+    };
+    if !has_json(&headers) {
+        return no_store(error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "需要 JSON 格式的账号设置。"));
+    }
+    if body_too_large(&body) {
+        return no_store(error(StatusCode::PAYLOAD_TOO_LARGE, "请求体过大。"));
+    }
+    let Some(change) = body.ok()
+        .and_then(|Json(value)| serde_json::from_value::<crate::trading::AccountChange>(value).ok())
+    else {
+        return no_store(error(StatusCode::BAD_REQUEST, "币安账号设置格式无效。"));
+    };
+    match trader.change_account(change).await {
+        Ok(()) => no_store(Json(trader.status().await).into_response()),
+        Err(message) => no_store(error(StatusCode::UNPROCESSABLE_ENTITY, &message)),
+    }
+}
+
 async fn trading_test_order(
     State(state): State<Service>,
     headers: HeaderMap,
@@ -616,17 +642,16 @@ async fn trading_test_order(
     if body_too_large(&body) {
         return no_store(error(StatusCode::PAYLOAD_TOO_LARGE, "请求体过大。"));
     }
-    let Some(request) = body
-        .ok()
-        .and_then(|Json(value)| serde_json::from_value::<crate::test_strategy::Request>(value).ok())
-    else {
+    let Ok(Json(value)) = body else {
+        return no_store(error(StatusCode::BAD_REQUEST, "下单请求格式无效。"));
+    };
+    let Ok(request) = serde_json::from_value::<crate::test_strategy::Request>(value) else {
         return no_store(error(StatusCode::BAD_REQUEST, "请检查交易对、方向、金额、杠杆、止损止盈和持仓时间。"));
     };
-    let result = match crate::test_strategy::intent(&state.binance, request).await {
-        Ok(intent) => trader.submit(intent).await,
-        Err(message) => Err(message),
+    let Ok(account_revision) = uuid::Uuid::parse_str(&request.account_revision) else {
+        return no_store(error(StatusCode::BAD_REQUEST, "请刷新下单页面并重新确认当前账号。"));
     };
-    trading_response(result)
+    trading_response(trader.submit(request.intent(), account_revision).await)
 }
 
 async fn trading_close(
@@ -753,6 +778,7 @@ mod tests {
             (monitor, Method::PUT),
             (monitor, Method::DELETE),
             ("/api/trading", Method::GET),
+            ("/api/trading/account", Method::PUT),
             ("/api/trading/test-order", Method::POST),
             ("/api/trading/close", Method::POST),
         ] {

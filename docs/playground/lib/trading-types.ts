@@ -51,6 +51,7 @@ export type TradingBalance = {
 
 export type TradingStatus = {
   mode: TradingMode;
+  accountRevision: string;
   enabled: boolean;
   problem: string | null;
   limits: { maxNotional: number; maxOpenTrades: number; maxLeverage: number };
@@ -60,13 +61,24 @@ export type TradingStatus = {
 
 export type TestOrderRequest = {
   symbol: string;
-  direction: "long" | "short" | "auto";
+  accountRevision: string;
+  direction: TradeSide;
   notional: number;
   leverage: number;
   stopLossPercent: number;
   takeProfitPercent: number;
   holdMinutes: number;
 };
+
+export type TradingLoginMode = Exclude<TradingMode, "off">;
+
+export type TradingAccountRequest = {
+  action: "login";
+  mode: TradingLoginMode;
+  apiKey: string;
+  secret: string;
+  confirmLive: boolean;
+} | { action: "logout"; accountRevision: string };
 
 export const tradingModeLabels: Record<TradingMode, string> = { off: "未开启", demo: "模拟盘", live: "实盘" };
 

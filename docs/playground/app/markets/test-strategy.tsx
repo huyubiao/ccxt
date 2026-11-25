@@ -12,7 +12,7 @@ type Props = {
 };
 
 const formatBalance = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
-const defaults = { symbol: "DOGEUSDT", direction: "auto", notional: "20", leverage: "2", stopLoss: "1", takeProfit: "1", hold: "5" };
+const defaults = { symbol: "DOGEUSDT", direction: "long", notional: "20", leverage: "2", stopLoss: "1", takeProfit: "1", hold: "5" };
 
 export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
   const [form, setForm] = useState(defaults);
@@ -27,9 +27,10 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!status || submitting) return;
+    if (!status?.enabled || submitting) return;
     const request: TestOrderRequest = {
       symbol: form.symbol.trim().toUpperCase(),
+      accountRevision: status.accountRevision,
       direction: form.direction as TestOrderRequest["direction"],
       notional: Number(form.notional),
       leverage: Math.trunc(Number(form.leverage)),
@@ -42,7 +43,7 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
       setMessage({ kind: "error", text: "请填写有效的正数。" });
       return;
     }
-    const direction = { long: "做多", short: "做空", auto: "按上一根 1 分钟K线方向" }[request.direction];
+    const direction = request.direction === "long" ? "做多" : "做空";
     const confirmation = `${live ? "⚠️ 实盘，真实资金！\n\n" : ""}确认在【${tradingModeLabels[status.mode]}】下单？\n\n` +
       `${request.symbol} · ${direction} · ${request.notional} USDT · ${request.leverage} 倍\n` +
       `止损 ${request.stopLossPercent}% · 止盈 ${request.takeProfitPercent}% · ${request.holdMinutes} 分钟后自动平仓`;
@@ -51,7 +52,7 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
     setMessage(null);
     try {
       await onSubmit(request);
-      setMessage({ kind: "ok", text: "已下单并挂好止损止盈，请在下方「自动下单任务 → 下单记录」查看。" });
+      setMessage({ kind: "ok", text: "已下单并挂好止损止盈，请在「下单记录」查看。" });
     } catch (caught) {
       setMessage({ kind: "error", text: caught instanceof Error ? caught.message : "下单失败。" });
     } finally {
@@ -78,7 +79,7 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
           </div>}
           {status?.problem && <p role="alert">下单未开启：{status.problem}</p>}
           {status && !status.problem && status.mode === "off" && <p role="status">
-            在 docs/playground/.env.local 中设置 PLAYGROUND_TRADING_MODE=demo 和模拟盘 API Key 后重启即可下单。
+            请在上方「账号设置」连接币安模拟盘或实盘。
           </p>}
           {error && <p role="alert">{error}</p>}
           <form className={styles.monitorForm} onSubmit={submit}>
@@ -87,7 +88,6 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
             <label htmlFor="test-direction">方向</label>
             <select id="test-direction" className={styles.tradingSelect} value={form.direction}
               onChange={(event) => update("direction", event.target.value)}>
-              <option value="auto">自动（跟随上一根 1 分钟K线）</option>
               <option value="long">做多</option>
               <option value="short">做空</option>
             </select>
@@ -106,8 +106,7 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
           {message && <p role={message.kind === "error" ? "alert" : "status"}>{message.text}</p>}
           <div className={styles.monitorHelp}>
             <p><strong>做什么：</strong>按设定方向市价开仓，立即在交易所挂好止损、止盈条件单（按标记价触发），到时间还没触发就市价平仓。</p>
-            <p><strong>用途：</strong>验证「策略 → 统一下单 → 交易所」整条链路。先用模拟盘跑通，再考虑实盘。</p>
-            <p><strong>限制：</strong>同一合约同时只允许一笔交易；交易所里已有持仓的合约不会下单；账户需为单向持仓模式。</p>
+            <p>使用双向持仓。同一合约的多仓和空仓可同时存在，每个方向只管理一笔策略交易。</p>
           </div>
         </section>
       </div>
