@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::binance::{number, Binance, Endpoint};
-use crate::markets::{bundle_candidate, bundled_coin, Cache, Exchange, Instrument, Kind, Markets, Snapshot};
+use crate::markets::{bundle_candidate, bundled_coin, Cache, Instrument, Markets, Snapshot};
 use crate::now_ms;
 use crate::research::{positive, Research};
 
@@ -193,12 +193,6 @@ impl Loader {
             until: now_ms() + 60_000,
         });
         Ok(value)
-    }
-
-    pub async fn contract_levels(&self, symbol: &str) -> Result<Value, LoadError> {
-        let pair = self.markets.instrument(Exchange::Binance, Kind::Futures, symbol)
-            .await.map_err(|_| LoadError::Upstream)?;
-        self.levels(&pair).await
     }
 
     async fn load(&self, pair: &Instrument) -> Result<Input, LoadError> {

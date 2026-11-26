@@ -1,4 +1,4 @@
-import type { AlertMarketContext, DirectionalThresholds, SpikeRecord } from "./price-alerts";
+import type { AlertMarketContext, AlertObservationRule, DirectionalThresholds, SpikeRecord } from "./price-alerts";
 import type { StrategyNotificationEvent } from "./strategy-notification-events";
 import type { AutoOrderRequest, AutoOrderWatch } from "./auto-order";
 import type { TradeSide } from "./trading-types";
@@ -11,31 +11,51 @@ export const defaultContinuationRule = {
 export type ContinuationRule = typeof defaultContinuationRule;
 export type ContinuationResult = {
   status: "pending" | "submitting" | "ordered" | "below-score" | "disabled" | "no-account" |
-    "unavailable" | "queue-skipped" | "interrupted" | "unknown" | "failed";
+    "unavailable" | "observation-unavailable" | "breakout-lost" | "queue-skipped" | "interrupted" | "unknown" | "failed";
   score?: {
     total: number;
     pricePoints: number;
     turnoverPoints: number;
-    liquidationPoints: number;
     rangePercent: number | null;
+  } & ({
+    breakoutPoints: number;
+    flowPoints: number;
+  } | {
+    liquidationPoints: number;
     dominantSide: TradeSide | null;
     nearSharePercent: number | null;
-  };
+  });
   side?: TradeSide;
   target?: number;
   tradeId?: string;
   error?: string;
 };
 
+export type BreakoutObservation = {
+  status: "pending" | "queue-skipped" | "no-trades" | "unavailable" | "interrupted";
+} | {
+  status: "ready";
+  windowSeconds: number;
+  buyUsdt: number;
+  sellUsdt: number;
+  netPercent: number;
+  position: "held" | "recovered" | "lost";
+  targetPrice: number;
+  lastPrice: number;
+  lastTradeTime: number;
+};
+
 export type BackgroundAlert = Extract<StrategyNotificationEvent, { kind: "market-spike" }> & {
   context?: AlertMarketContext | "request-failed" | "queue-skipped";
   continuation?: ContinuationResult;
+  breakoutObservation?: BreakoutObservation;
 };
 export type BackgroundRule = DirectionalThresholds & {
   enabled: boolean;
   notify: boolean;
   seconds: number;
   turnoverMultiple: number;
+  observation: AlertObservationRule;
   continuation: ContinuationRule;
 };
 export type DeliveryState = "disabled" | "queued" | "sending" | "sent" | "duplicate" |

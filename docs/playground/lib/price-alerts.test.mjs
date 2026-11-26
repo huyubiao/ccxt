@@ -1,13 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  alertDayStart, clampAlertThreshold, clampTurnoverMultiple, forecastAlertDirection,
-  getTurnoverBaseline, getTurnoverMultiple, parseAlertSeconds,
+  alertDayStart, clampAlertThreshold, clampTurnoverMultiple, DEFAULT_ALERT_OBSERVATION,
+  getTurnoverBaseline, getTurnoverMultiple, parseAlertObservation, parseAlertSeconds,
   recordDirectionalPrice, recordPrice, recordPriceLevel,
-  restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceSeries,
+  restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceAlert,
 } from "./price-alerts.ts";
 
 const checkedVolume = { turnover: 390_000, baseline: 120_000, multiple: 3.25 };
+
+function confirmFirst(state, trigger, confirmedAt = trigger.move.sample.time) {
+  settlePriceAlert(state, trigger.pending, { volume: checkedVolume, confirmedAt });
+}
 
 test("alert daily changes use the Beijing calendar day of the trigger", () => {
   const midnight = Date.UTC(2026, 10, 23, 16);
@@ -16,84 +20,161 @@ test("alert daily changes use the Beijing calendar day of the trigger", () => {
   assert.equal(alertDayStart(midnight + 12 * 3_600_000), midnight);
 });
 
-test("the forecast follows the move since the trigger, using the alert move when the price is unchanged", () => {
-  const rise = { price: 105, change: 5 };
-  const fall = { price: 95, change: -5 };
-  assert.equal(forecastAlertDirection(rise, 106), "up");
-  assert.equal(forecastAlertDirection(rise, 104), "down");
-  assert.equal(forecastAlertDirection(fall, 94), "down");
-  assert.equal(forecastAlertDirection(fall, 96), "up");
-  assert.equal(forecastAlertDirection(rise), "up");
-  assert.equal(forecastAlertDirection(fall, 95), "down");
-});
-
-test("an overshoot uses the threshold price as the base for the next level", () => {
+test("observation levels use the original reference even when the first trigger overshoots", () => {
   const state = { samples: [] };
-  const tick = (time, price) => recordPriceLevel(state, { time, price }, 5, 30);
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 5, down: null }, 30);
   assert.equal(tick(1000, 100), null);
   const first = tick(11000, 108);
   assert.equal(first.needsTurnover, true);
   assert.equal(first.move.level, 1);
   assert.equal(first.move.target, 105);
-  assert.equal(settlePriceSeries(state, first.series, checkedVolume), first.move);
-  assert.equal(tick(40000, 110.24), null);
-  const second = tick(41000, 110.25);
+  confirmFirst(state, first);
+  assert.equal(state.series.latest, first.move);
+  assert.equal(tick(40000, 110.2499), null);
+  const second = tick(95000, 110.25);
   assert.equal(second.needsTurnover, false);
   assert.equal(second.move.level, 2);
-  assert.equal(second.move.previous, 105);
+  assert.ok(Math.abs(second.move.previous - 105) < 1e-10);
+  assert.ok(Math.abs(second.move.target - 110.25) < 1e-10);
+  assert.equal(second.move.threshold, 5);
   assert.deepEqual(second.volume, checkedVolume);
-  assert.equal(tick(70000, 116).move.level, 3);
+  assert.equal(second.move.originalReference, 100);
+  assert.equal(tick(150000, 115.7624), null);
+  assert.equal(tick(151000, 115.7625).move.level, 3);
 });
 
 test("fast moves can skip levels in both directions, including the first alert", () => {
   for (const [threshold, firstPrice, nextPrice] of [[5, 116, 128], [-5, 85, 77]]) {
     const state = { samples: [] };
-    const tick = (time, price) => recordPriceLevel(state, { time, price }, threshold, 30);
+    const rules = threshold > 0 ? { up: threshold, down: null } : { up: null, down: threshold };
+    const tick = (time, price) => recordPriceLevel(state, { time, price }, rules, 30);
     tick(1000, 100);
     const first = tick(2000, firstPrice);
     assert.equal(first.move.level, 3);
     assert.equal(first.needsTurnover, true);
-    settlePriceSeries(state, first.series, checkedVolume);
+    confirmFirst(state, first);
     const next = tick(3000, nextPrice);
     assert.equal(next.move.level, 5);
     assert.equal(next.needsTurnover, false);
   }
 });
 
-test("higher levels reached while turnover is pending wait for the first check", () => {
-  for (const passed of [true, false]) {
-    const state = { samples: [] };
-    const tick = (time, price) => recordPriceLevel(state, { time, price }, 5, 30);
-    tick(1000, 100);
-    const first = tick(2000, 108);
-    assert.equal(tick(3000, 116), null);
-    assert.equal(tick(2500, 125), null);
-    assert.equal(tick(4000, 110), null);
-    const latest = settlePriceSeries(state, first.series, passed ? checkedVolume : null);
-    assert.equal(latest?.level, passed ? 3 : undefined);
-    if (passed) {
-      assert.equal(latest.sample.time, 3000);
-      assert.equal(forecastAlertDirection({ price: latest.sample.price, change: latest.change }, state.samples.at(-1).price), "down");
-    }
-    const next = tick(5000, 122);
-    assert.equal(next.needsTurnover, !passed);
-    assert.equal(next.move.level, passed ? 4 : 2);
-  }
-});
-
-test("an expired series cannot bypass the next series' turnover check", () => {
+test("observation starts at confirmation and uses only subsequent prices for upgrades", () => {
   const state = { samples: [] };
-  const tick = (time, price) => recordPriceLevel(state, { time, price }, 5, 30);
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 5, down: null }, 30);
   tick(1000, 100);
   const first = tick(2000, 108);
-  tick(10000, 108);
-  const next = tick(32001, 114);
+  assert.equal(tick(3000, 116), null);
+  assert.equal(tick(2500, 125), null);
+  assert.equal(tick(4000, 110), null);
+  assert.equal(state.series, undefined);
+  confirmFirst(state, first, 5000);
+  assert.equal(state.series.latest, first.move);
+  assert.equal(tick(4500, 122), null);
+  const next = tick(6000, 110.25);
+  assert.equal(next.needsTurnover, false);
+  assert.equal(next.move.level, 2);
+});
+
+test("a failed turnover check allows a fresh short-window trigger immediately", () => {
+  const state = { samples: [] };
+  const rule = { ...DEFAULT_ALERT_OBSERVATION, minutes: 1 };
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 5, down: -5 }, 30, rule);
+  tick(1000, 100);
+  const first = tick(2000, 105);
+  assert.equal(tick(3000, 110.25), null);
+  settlePriceAlert(state, first.pending, null);
+  confirmFirst(state, first);
+  assert.equal(state.series, undefined);
+  const next = tick(4000, 116);
   assert.equal(next.needsTurnover, true);
   assert.equal(next.move.level, 1);
-  assert.equal(next.move.previous, 108);
-  settlePriceSeries(state, first.series, checkedVolume);
-  assert.equal(tick(33000, 120), null);
-  assert.equal(settlePriceSeries(state, next.series, checkedVolume).level, 2);
+  assert.equal(next.move.originalReference, 110.25);
+});
+
+test("each upgrade resets the configured deadline and expiry requires a fresh check", () => {
+  const state = { samples: [] };
+  const rule = { ...DEFAULT_ALERT_OBSERVATION, minutes: 2 };
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 5, down: null }, 30, rule);
+  tick(1000, 100);
+  const first = tick(2000, 108);
+  confirmFirst(state, first, 5000);
+  assert.equal(tick(124999, 111).move.level, 2);
+  assert.equal(tick(125000, 112), null);
+  assert.equal(tick(200000, 115.7625).move.level, 3);
+  assert.equal(tick(319998, 101), null);
+  assert.equal(tick(319999, 115.7625), null);
+  assert.equal(state.series.latest.level, 3);
+  assert.equal(tick(320000, 121.56), null);
+  assert.equal(state.series, undefined);
+  const next = tick(321000, 128);
+  assert.equal(next.needsTurnover, true);
+  assert.equal(next.move.level, 1);
+  assert.equal(next.move.originalReference, 121.56);
+  confirmFirst(state, first);
+  assert.equal(state.series, undefined);
+  confirmFirst(state, next);
+  assert.equal(state.series.latest.level, 1);
+});
+
+test("compounded observation bands follow the first direction until price returns to the reference", () => {
+  const state = { samples: [] };
+  const observation = { minutes: 8, upPercent: 4, downPercent: 6 };
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 3, down: -3 }, 30, observation);
+  tick(1000, 100);
+  const first = tick(2000, 103);
+  assert.equal(first.move.level, 1);
+  confirmFirst(state, first);
+  assert.equal(tick(3000, 103.9), null);
+  for (const [time, price, level] of [[4000, 104, 2], [96000, 108.16, 3]]) {
+    const upgrade = tick(time, price);
+    assert.equal(upgrade.move.level, level);
+    assert.equal(upgrade.move.threshold, 4);
+    assert.equal(upgrade.move.originalReference, 100);
+    assert.equal(upgrade.move.observationMinutes, 8);
+    assert.equal(upgrade.needsTurnover, false);
+  }
+  assert.equal(tick(97000, 101), null);
+  assert.equal(tick(98000, 108.16), null);
+  assert.equal(tick(99000, 100), null);
+  assert.equal(state.series, undefined);
+  const next = tick(100000, 97);
+  assert.equal(next.needsTurnover, true);
+  assert.equal(next.move.threshold, -3);
+  confirmFirst(state, next);
+  assert.equal(tick(101000, 94.01), null);
+  assert.equal(tick(102000, 94).move.level, 2);
+  const down = tick(103000, 88.36).move;
+  assert.equal(down.level, 3);
+  assert.equal(down.threshold, -6);
+  assert.equal(down.originalReference, 100);
+  assert.equal(tick(104000, 100.01), null);
+  assert.equal(state.series, undefined);
+});
+
+test("a late turnover response cannot confirm a round that returned to the reference", () => {
+  const state = { samples: [] };
+  const rule = { ...DEFAULT_ALERT_OBSERVATION, minutes: 1 };
+  const tick = (time, price) => recordPriceLevel(state, { time, price }, { up: 5, down: -5 }, 30, rule);
+  tick(1000, 100);
+  const old = tick(2000, 105);
+  assert.equal(tick(3000, 99), null);
+  assert.equal(state.series, undefined);
+  const next = tick(4000, 94);
+  assert.equal(next.move.threshold, -5);
+  confirmFirst(state, old);
+  settlePriceAlert(state, old.pending, null);
+  assert.equal(state.series, undefined);
+  confirmFirst(state, next);
+  assert.equal(state.series.latest.originalReference, 99);
+});
+
+test("observation settings accept integer minutes and independent percentages", () => {
+  assert.deepEqual(parseAlertObservation("15", "5", "5"), DEFAULT_ALERT_OBSERVATION);
+  assert.deepEqual(parseAlertObservation(22, 3.25, 7), { minutes: 22, upPercent: 3.25, downPercent: 7 });
+  for (const input of [[0, 5, 5], [1.5, 5, 5], [15, "", 5], [15, Infinity, 5], [15, 4, -5], [15, 4, 101]]) {
+    assert.equal(parseAlertObservation(...input), null);
+  }
 });
 
 test("turnover input clamps numeric values to 2 through 100 times", () => {

@@ -67,6 +67,10 @@ impl Trader {
         }
         request.action.validate()?;
         let mut core = exchange.lock().await;
+        self.reconcile_round_increase(&mut core, &mut trade).await?;
+        if trade.status != "open" {
+            return Err("这笔交易已进入平仓处理。".into());
+        }
         if let PositionAction::CancelLimitClose = request.action {
             self.cancel_exits(&mut core, &mut trade, Some(LIMIT_EXIT))
                 .await?;
@@ -84,7 +88,7 @@ impl Trader {
             let recorded_exits: f64 = trade
                 .orders
                 .iter()
-                .filter(|order| order.kind != "entry")
+                .filter(|order| !matches!(order.kind.as_str(), "entry" | "add-entry"))
                 .filter_map(|order| order.execution.as_ref())
                 .map(|execution| execution.filled)
                 .sum();

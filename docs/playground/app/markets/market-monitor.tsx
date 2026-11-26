@@ -5,12 +5,12 @@ import { mergeAlertHistory, readSpikeRecords, retainSpikeRecords, saveSpikeRecor
 import { apiUrl } from "@/lib/basePath";
 import { getContractCoins, type MarketInstrument } from "@/lib/market-lookup";
 import {
-  DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_PERCENT, MAX_ALERT_SECONDS, MAX_TURNOVER_MULTIPLE,
+  DEFAULT_ALERT_OBSERVATION, DEFAULT_ALERT_SECONDS, DEFAULT_TURNOVER_MULTIPLE, MAX_ALERT_PERCENT, MAX_ALERT_SECONDS, MAX_TURNOVER_MULTIPLE,
   MIN_ALERT_PERCENT, MIN_ALERT_SECONDS, MIN_TURNOVER_MULTIPLE,
-  clampAlertThreshold, clampTurnoverMultiple, getTurnoverMultiple, parseAlertSeconds,
-  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceSeries, spikeKey,
-  type AlertTurnover, type AlertVolume, type DirectionalThresholds,
-  type LeveledPriceState, type PriceAlertLevel, type PriceAlertSeries, type SpikeIdentity, type SpikeRecord,
+  clampAlertThreshold, clampTurnoverMultiple, getTurnoverMultiple, parseAlertObservation, parseAlertSeconds,
+  recordPriceLevel, restoreAlertSeconds, restoreAlertThreshold, restoreTurnoverMultiple, settlePriceAlert, spikeKey,
+  type AlertObservationRule, type AlertTurnover, type AlertVolume, type DirectionalThresholds,
+  type LeveledPriceState, type PendingPriceAlert, type PriceAlertLevel, type SpikeIdentity, type SpikeRecord,
 } from "@/lib/price-alerts";
 import { createMarketSpikeEvent } from "@/lib/strategy-notification-events";
 import { useBackgroundMonitor } from "./use-background-monitor";
@@ -22,6 +22,7 @@ import DingTalkSettings from "./dingtalk-settings";
 import BinanceSettings from "./binance-settings";
 import TestStrategy from "./test-strategy";
 import TradeRecords from "./trade-records";
+import { useRememberedDetails } from "./use-remembered-details";
 import { useTrading } from "./use-trading";
 import styles from "./markets.module.css";
 
@@ -32,6 +33,7 @@ const ENABLED_STORAGE_KEY = "ccxt-market-alert-enabled";
 const DINGTALK_NOTIFICATION_STORAGE_KEY = "ccxt-market-alert-dingtalk-notifications";
 const DIRECTION_STORAGE_KEY = "ccxt-market-alert-directions";
 const TURNOVER_STORAGE_KEY = "ccxt-market-alert-turnover-multiple";
+const OBSERVATION_STORAGE_KEY = "ccxt-market-alert-observation";
 const QUEUE_LIMIT = 100;
 const TURNOVER_CONCURRENCY = 2;
 const DEFAULT_THRESHOLDS: DirectionalThresholds = { up: 5, down: -5 };
@@ -40,15 +42,20 @@ const formatPercent = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4,
 type TurnoverJob = {
   record: SpikeRecord & { requiredMultiple: number };
   state: LeveledPriceState;
-  series: PriceAlertSeries;
+  pending: PendingPriceAlert;
 };
 type Tick = { e: string; s: string; E: number; c: string; st?: number };
 
-function levelRecord(symbol: string, move: PriceAlertLevel, threshold: number, seconds: number) {
+function levelRecord(symbol: string, move: PriceAlertLevel, seconds: number) {
   return {
     symbol, time: move.sample.sampledAt ?? move.sample.time, price: move.sample.price, previous: move.previous,
-    change: move.change, threshold, seconds, level: move.level,
+    originalReference: move.originalReference, observationMinutes: move.observationMinutes,
+    change: move.change, threshold: move.threshold, seconds, level: move.level,
   };
+}
+
+function observationInputs(rule: AlertObservationRule) {
+  return { minutes: String(rule.minutes), upPercent: String(rule.upPercent), downPercent: String(rule.downPercent) };
 }
 
 export default function MarketMonitor({ contracts, coinCount, directoryError }: {
@@ -56,6 +63,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   coinCount: number | null;
   directoryError: boolean;
 }) {
+  const strategyDetails = useRememberedDetails("market-spike");
+  const accountDetails = useRememberedDetails("account-settings");
   const [enabled, setEnabled] = useState(false);
   const [upInput, setUpInput] = useState("5");
   const [downInput, setDownInput] = useState("5");
@@ -66,12 +75,14 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [seconds, setSeconds] = useState(DEFAULT_ALERT_SECONDS);
   const [turnoverInput, setTurnoverInput] = useState(String(DEFAULT_TURNOVER_MULTIPLE));
   const [turnoverMultiple, setTurnoverMultiple] = useState(DEFAULT_TURNOVER_MULTIPLE);
+  const [observation, setObservation] = useState(DEFAULT_ALERT_OBSERVATION);
+  const [observationInput, setObservationInput] = useState(() => observationInputs(DEFAULT_ALERT_OBSERVATION));
   const [lookbackInput, setLookbackInput] = useState(String(defaultContinuationRule.lookbackHours));
   const [rangeInput, setRangeInput] = useState(String(defaultContinuationRule.maxRangePercent));
   const [scoreTurnoverInput, setScoreTurnoverInput] = useState(String(defaultContinuationRule.turnoverMultiple));
   const [spikeStopInput, setSpikeStopInput] = useState(String(defaultContinuationRule.stopLossPercent));
   const [spikeTakeInput, setSpikeTakeInput] = useState(String(defaultContinuationRule.takeProfitPercent));
-  const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | null>(null);
+  const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | "observation" | null>(null);
   const [spikes, setSpikes] = useState<SpikeRecord[]>([]);
   const [recordsReady, setRecordsReady] = useState(false);
   const background = useBackgroundMonitor();
@@ -85,8 +96,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [online, setOnline] = useState(false);
   const [dingTalkEnabled, setDingTalkEnabled] = useState(false);
   const notifyDingTalk = useRef(false);
-  const activeRule = useRef<DirectionalThresholds & { seconds: number; turnoverMultiple: number }>({
+  const activeRule = useRef<DirectionalThresholds & { seconds: number; turnoverMultiple: number; observation: AlertObservationRule }>({
     ...DEFAULT_THRESHOLDS, seconds: DEFAULT_ALERT_SECONDS, turnoverMultiple: DEFAULT_TURNOVER_MULTIPLE,
+    observation: DEFAULT_ALERT_OBSERVATION,
   });
   const symbols = useMemo(() => background.mode === "browser" && enabled && contracts ? new Set(contracts.map(({ id }) => id)) : null,
     [background.mode, enabled, contracts]);
@@ -98,7 +110,13 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const displayedThresholds = serverRule ?? thresholds;
   const displayedSeconds = serverRule?.seconds ?? seconds;
   const displayedMultiple = serverRule?.turnoverMultiple ?? turnoverMultiple;
-  const continuation = serverRule?.continuation ?? defaultContinuationRule;
+  const displayedObservation = serverRule ? serverRule.observation ?? DEFAULT_ALERT_OBSERVATION : observation;
+  const storedContinuation = serverRule?.continuation ?? defaultContinuationRule;
+  const continuation = {
+    ...storedContinuation,
+    stopLossPercent: storedContinuation.stopLossPercent ?? defaultContinuationRule.stopLossPercent,
+    takeProfitPercent: storedContinuation.takeProfitPercent ?? defaultContinuationRule.takeProfitPercent,
+  };
   const tradingMode = trading.data?.mode ?? "off";
   const serverSpikes = background.data?.spikes;
   const serverRecords = background.data?.records;
@@ -108,6 +126,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const storedDown = serverRule?.down;
   const storedSeconds = serverRule?.seconds;
   const storedMultiple = serverRule?.turnoverMultiple;
+  const storedMinutes = serverRule?.observation?.minutes;
+  const storedObservationUp = serverRule?.observation?.upPercent;
+  const storedObservationDown = serverRule?.observation?.downPercent;
   useEffect(() => {
     if (storedUp === undefined || storedDown === undefined || storedSeconds === undefined || storedMultiple === undefined) return;
     setUpSelected(storedUp !== null);
@@ -117,6 +138,11 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     setSecondsInput(String(storedSeconds));
     setTurnoverInput(String(storedMultiple));
   }, [storedUp, storedDown, storedSeconds, storedMultiple]);
+
+  useEffect(() => {
+    const rule = parseAlertObservation(storedMinutes, storedObservationUp, storedObservationDown);
+    if (rule) setObservationInput(observationInputs(rule));
+  }, [storedMinutes, storedObservationUp, storedObservationDown]);
 
   useEffect(() => {
     setLookbackInput(String(continuation.lookbackHours));
@@ -169,6 +195,13 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
         setTurnoverInput(String(savedMultiple));
       }
       setEnabled(localStorage.getItem(ENABLED_STORAGE_KEY) === "true");
+      const savedObservation = JSON.parse(localStorage.getItem(OBSERVATION_STORAGE_KEY) ?? "null");
+      const observation = parseAlertObservation(savedObservation?.minutes, savedObservation?.upPercent, savedObservation?.downPercent);
+      if (observation) {
+        activeRule.current.observation = observation;
+        setObservation(observation);
+        setObservationInput(observationInputs(observation));
+      }
     } catch {
       // Monitoring remains available without browser storage.
     }
@@ -194,7 +227,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     if (!hasSymbols) return;
     const lifecycle = new AbortController();
     let sampledSymbols = activeSymbols.current;
-    const samples = new Map<string, Record<keyof DirectionalThresholds, LeveledPriceState>>();
+    const samples = new Map<string, LeveledPriceState>();
     const latestPrices = new Map<string, { price: number; eventTime: number }>();
     let sampledRule = activeRule.current;
     let samplingTimer: ReturnType<typeof setTimeout>;
@@ -219,14 +252,16 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       setSpikes((current) => retainSpikeRecords([...batch, ...current]));
     }
 
-    function confirmAlert(record: SpikeRecord & { volume: AlertVolume }, latestPrice?: number) {
+    function confirmAlert(record: SpikeRecord & { volume: AlertVolume }) {
       if (!activeSymbols.current?.has(record.symbol)) return;
-      const event = createMarketSpikeEvent(record, record.volume, latestPrice);
+      const event = createMarketSpikeEvent(record, record.volume);
       if (notifyDingTalk.current) notifyStrategy(event);
     }
 
-    function resetPriceMonitoring() {
-      samples.clear();
+    function resetPriceMonitoring(keepSeries = false) {
+      for (const [symbol, state] of samples) {
+        if (!keepSeries || !state.series) samples.delete(symbol);
+      }
       pendingTurnover.length = 0;
       turnoverScope.abort();
       turnoverScope = new AbortController();
@@ -235,42 +270,43 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
 
     function syncRule() {
       const rule = activeRule.current;
-      if (sampledRule.seconds !== rule.seconds || sampledRule.up !== rule.up || sampledRule.down !== rule.down) {
+      if (sampledRule.seconds !== rule.seconds || sampledRule.up !== rule.up || sampledRule.down !== rule.down ||
+          sampledRule.turnoverMultiple !== rule.turnoverMultiple || sampledRule.observation.minutes !== rule.observation.minutes ||
+          sampledRule.observation.upPercent !== rule.observation.upPercent || sampledRule.observation.downPercent !== rule.observation.downPercent) {
         resetPriceMonitoring();
       }
       sampledRule = rule;
       return rule;
     }
 
-    async function checkTurnover({ record, state, series }: TurnoverJob) {
+    async function checkTurnover({ record, state, pending }: TurnoverJob) {
+      const isCurrent = () => activeSymbols.current?.has(record.symbol) &&
+        samples.get(record.symbol) === state && state.pending === pending;
+      const interrupt = () => setSpikes((current) => current.map((row) => row === record ? { ...row, status: "interrupted" } : row));
+      if (!isCurrent()) {
+        interrupt();
+        return;
+      }
       const signal = turnoverScope.signal;
       const data = await fetchTurnover(record, signal).catch(() => null);
       if (lifecycle.signal.aborted || signal.aborted) return;
       syncRule();
       if (signal.aborted) return;
-      const direction = record.threshold > 0 ? "up" : "down";
-      if (!activeSymbols.current?.has(record.symbol) || samples.get(record.symbol)?.[direction] !== state) {
-        settlePriceSeries(state, series, null);
-        setSpikes((current) => current.map((row) => row === record ? { ...row, status: "interrupted" } : row));
+      if (!isCurrent()) {
+        interrupt();
         return;
       }
       const multiple = data ? getTurnoverMultiple(data) : null;
       const volume = data ? { ...data, multiple } : undefined;
-      const passed = volume && multiple !== null && multiple >= record.requiredMultiple;
-      const latest = settlePriceSeries(state, series, passed ? volume : null);
-      const upgraded = latest !== null && latest.level > record.level;
+      const confirmedVolume = volume && multiple !== null && multiple >= record.requiredMultiple ? volume : null;
       const result: SpikeRecord = {
         ...record,
-        status: latest ? upgraded ? "upgraded" : "alerted" : multiple === null ? "unavailable" : "below-threshold",
+        status: confirmedVolume ? "alerted" : multiple === null ? "unavailable" : "below-threshold",
         volume,
       };
-      if (latest && volume) {
-        const details = upgraded ? levelRecord(record.symbol, latest, record.threshold, record.seconds) : record;
-        const alert = { ...details, status: "alerted" as const, requiredMultiple: upgraded ? null : record.requiredMultiple, volume };
-        confirmAlert(alert, state.samples.at(-1)?.price);
-        if (upgraded) addSpikeRecords([alert]);
-      }
       setSpikes((current) => current.map((row) => row === record ? result : row));
+      settlePriceAlert(state, pending, confirmedVolume ? { volume: confirmedVolume, confirmedAt: Date.now() } : null);
+      if (confirmedVolume) confirmAlert({ ...result, volume: confirmedVolume });
     }
 
     function processTurnoverQueue() {
@@ -288,9 +324,11 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       if (sampledSymbols === activeSymbols.current) return;
       sampledSymbols = activeSymbols.current;
       const previousSize = latestPrices.size;
+      for (const symbol of samples.keys()) {
+        if (!sampledSymbols?.has(symbol)) samples.delete(symbol);
+      }
       for (const symbol of latestPrices.keys()) {
         if (!sampledSymbols?.has(symbol)) {
-          samples.delete(symbol);
           latestPrices.delete(symbol);
         }
       }
@@ -306,24 +344,19 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       const { seconds } = rule;
       const batch: SpikeRecord[] = [];
       for (const [symbol, { price }] of latestPrices) {
-        const series = samples.get(symbol) ?? { up: { samples: [] }, down: { samples: [] } };
-        samples.set(symbol, series);
-        for (const direction of ["up", "down"] as const) {
-          const threshold = rule[direction];
-          if (threshold === null) continue;
-          const state = series[direction];
-          const result = recordPriceLevel(state, { time, price, sampledAt }, threshold, seconds);
-          if (!result) continue;
-          const details = levelRecord(symbol, result.move, threshold, seconds);
-          if (result.needsTurnover) {
-            const record = { ...details, requiredMultiple: rule.turnoverMultiple, status: "pending" as const };
-            batch.push(record);
-            pendingTurnover.push({ record, state, series: result.series });
-          } else {
-            const record = { ...details, requiredMultiple: null, status: "alerted" as const, volume: result.volume };
-            batch.push(record);
-            confirmAlert(record);
-          }
+        const state = samples.get(symbol) ?? { samples: [] };
+        samples.set(symbol, state);
+        const result = recordPriceLevel(state, { time, price, sampledAt }, rule, seconds, rule.observation);
+        if (!result) continue;
+        const details = levelRecord(symbol, result.move, seconds);
+        if (result.needsTurnover) {
+          const record = { ...details, requiredMultiple: rule.turnoverMultiple, status: "pending" as const };
+          batch.push(record);
+          pendingTurnover.push({ record, state, pending: result.pending });
+        } else {
+          const record = { ...details, requiredMultiple: null, status: "alerted" as const, volume: result.volume };
+          batch.push(record);
+          confirmAlert(record);
         }
       }
       if (!batch.length) return;
@@ -331,7 +364,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       if (pendingTurnover.length > QUEUE_LIMIT) {
         const dropped = new Set<SpikeRecord>();
         for (const job of pendingTurnover.splice(0, pendingTurnover.length - QUEUE_LIMIT)) {
-          settlePriceSeries(job.state, job.series, null);
+          settlePriceAlert(job.state, job.pending, null);
           dropped.add(job.record);
         }
         setSpikes((current) => current.map((row) => dropped.has(row) ? { ...row, status: "skipped" } : row));
@@ -367,7 +400,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       };
       connection.onerror = () => connection.close();
       connection.onclose = () => {
-        resetPriceMonitoring();
+        resetPriceMonitoring(true);
         latestPrices.clear();
         setObservedSymbols(new Set());
         setOnline(false);
@@ -451,17 +484,22 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
 
   function saveServerRule(change: Partial<BackgroundRule>) {
     const rule = serverRule ?? {
-      ...activeRule.current, enabled: strategyEnabled, notify: strategyNotify, continuation: defaultContinuationRule,
+      ...activeRule.current, enabled: strategyEnabled, notify: strategyNotify,
     };
-    void background.save({ ...rule, ...change, accountRevision: trading.data?.accountRevision });
+    void background.save({ ...rule, observation: rule.observation ?? DEFAULT_ALERT_OBSERVATION, continuation, ...change,
+      accountRevision: trading.data?.accountRevision });
   }
 
   function saveContinuation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const stopInput = spikeStopInput || String(defaultContinuationRule.stopLossPercent);
+    const takeInput = spikeTakeInput || String(defaultContinuationRule.takeProfitPercent);
+    setSpikeStopInput(stopInput);
+    setSpikeTakeInput(takeInput);
     saveServerRule({ continuation: {
       ...continuation, lookbackHours: Number(lookbackInput), maxRangePercent: Number(rangeInput),
       turnoverMultiple: Number(scoreTurnoverInput),
-      stopLossPercent: Number(spikeStopInput), takeProfitPercent: Number(spikeTakeInput),
+      stopLossPercent: Number(stopInput), takeProfitPercent: Number(takeInput),
     } });
   }
 
@@ -495,25 +533,29 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     const down = downSelected ? normalizeThreshold("down") : null;
     const nextSeconds = parseAlertSeconds(secondsInput);
     const nextMultiple = normalizeTurnoverInput();
+    const nextObservation = parseAlertObservation(observationInput.minutes, observationInput.upPercent, observationInput.downPercent);
     const error = nextSeconds === null ? "seconds" : !upSelected && !downSelected ? "directions"
       : upSelected && up === null ? "up"
       : downSelected && down === null ? "down"
-      : nextMultiple === null ? "turnover" : null;
+      : nextMultiple === null ? "turnover" : nextObservation === null ? "observation" : null;
     setInvalid(error);
-    if (error || nextSeconds === null || nextMultiple === null) return;
+    if (error || nextSeconds === null || nextMultiple === null || nextObservation === null) return;
     const next: DirectionalThresholds = { up, down };
     if (server) {
-      saveServerRule({ ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple });
+      saveServerRule({ ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple, observation: nextObservation });
       return;
     }
-    activeRule.current = { ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple };
+    activeRule.current = { ...next, seconds: nextSeconds, turnoverMultiple: nextMultiple, observation: nextObservation };
     setThresholds(next);
     setSeconds(nextSeconds);
     setTurnoverMultiple(nextMultiple);
+    setObservation(nextObservation);
+    setObservationInput(observationInputs(nextObservation));
     try {
       localStorage.setItem(DIRECTION_STORAGE_KEY, JSON.stringify(next));
       localStorage.setItem(WINDOW_STORAGE_KEY, String(nextSeconds));
       localStorage.setItem(TURNOVER_STORAGE_KEY, String(nextMultiple));
+      localStorage.setItem(OBSERVATION_STORAGE_KEY, JSON.stringify(nextObservation));
     } catch {
       // The current session still uses the new threshold.
     }
@@ -528,7 +570,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
       : `${online ? "行情已连接" : "正在连接行情"} · 已收到 ${observedCoins} 个币种的行情`;
 
   const strategy = (
-    <details className={styles.monitorFeature}>
+    <details className={styles.monitorFeature} {...strategyDetails}>
       <summary className={styles.monitorSummary}>
         <h3>异动监控策略 <small>{monitoringStatus}</small></h3>
       </summary>
@@ -544,7 +586,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
         {background.error && <p role="alert">{background.error}</p>}
         <section className={`${styles.result} ${styles.monitorSettings}`} aria-label="告警设置">
           <form className={styles.monitorForm} onSubmit={saveSettings}>
-            <label htmlFor="alert-seconds">时间窗口（{MIN_ALERT_SECONDS}–{MAX_ALERT_SECONDS} 秒）</label>
+            <label htmlFor="alert-seconds">首次触发窗口（{MIN_ALERT_SECONDS}–{MAX_ALERT_SECONDS} 秒）</label>
             <input id="alert-seconds" inputMode="numeric" value={secondsInput} onChange={(event) => setSecondsInput(event.target.value)}
               aria-invalid={invalid === "seconds"} aria-describedby="alert-window-help" placeholder={String(DEFAULT_ALERT_SECONDS)} />
             <label className={styles.monitorSwitch}>
@@ -561,6 +603,18 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             <input aria-label="下跌阈值" value={downInput} disabled={!downSelected} onChange={(event) => setDownInput(event.target.value)}
               onBlur={() => normalizeThreshold("down")}
               aria-invalid={invalid === "down"} aria-describedby="alert-down-help" placeholder="5" />
+            <label htmlFor="alert-observation-minutes">观察期窗口（分钟）</label>
+            <input id="alert-observation-minutes" inputMode="numeric" value={observationInput.minutes}
+              onChange={(event) => setObservationInput({ ...observationInput, minutes: event.target.value })}
+              aria-invalid={invalid === "observation"} aria-describedby="alert-observation-help" />
+            <label htmlFor="alert-observation-up">观察期上涨幅度（%）</label>
+            <input id="alert-observation-up" inputMode="decimal" value={observationInput.upPercent}
+              onChange={(event) => setObservationInput({ ...observationInput, upPercent: event.target.value })}
+              aria-invalid={invalid === "observation"} aria-describedby="alert-observation-help" />
+            <label htmlFor="alert-observation-down">观察期下跌幅度（%）</label>
+            <input id="alert-observation-down" inputMode="decimal" value={observationInput.downPercent}
+              onChange={(event) => setObservationInput({ ...observationInput, downPercent: event.target.value })}
+              aria-invalid={invalid === "observation"} aria-describedby="alert-observation-help" />
             <label htmlFor="alert-turnover-multiple">告警成交额倍数（{MIN_TURNOVER_MULTIPLE}–{MAX_TURNOVER_MULTIPLE} 倍）</label>
             <input id="alert-turnover-multiple" inputMode="decimal" value={turnoverInput} onChange={(event) => setTurnoverInput(event.target.value)}
               onBlur={normalizeTurnoverInput}
@@ -582,8 +636,10 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
           {invalid === "up" && <p role="alert">请输入有效的上涨幅度。</p>}
           {invalid === "down" && <p role="alert">请输入有效的下跌幅度。</p>}
           {invalid === "turnover" && <p role="alert">请输入有效的成交额倍数。</p>}
+          {invalid === "observation" && <p role="alert">观察期请填写正整数分钟，涨跌幅请填写大于 0% 且不超过 100% 的数值。</p>}
           <div className={styles.monitorHelp}>
-            <p><strong>时间窗口：</strong><span id="alert-window-help">填 30 就看最近 30 秒内的涨跌，并统计这 30 秒的成交额。</span></p>
+            <p><strong>首次触发窗口</strong> <span id="alert-window-help">填 30 就看最近 30 秒内的涨跌，并统计这 30 秒的成交额。</span></p>
+            <p><strong>升级观察</strong> <span id="alert-observation-help">从首次告警确认时开始计时，只沿首次告警方向升级。每次升级重新计时，到期或回到、越过原始参考价时结束本轮。</span></p>
             <p><strong>上涨幅度：</strong><span id="alert-up-help">勾选并填 5，窗口内涨幅达到 5% 就记一条异动。</span></p>
             <p><strong>下跌幅度：</strong><span id="alert-down-help">勾选并填 5，窗口内跌幅达到 5% 就记一条异动。</span></p>
             <p><strong>告警成交额倍数：</strong><span id="alert-turnover-help">填 3，每轮首次告警要求窗口成交额达到基准的 3 倍。比如监控窗口是 10:00:00 到 10:00:30，取 09:00 到 10:00 的 60 根完整 1 分钟 K 线的成交额中位数，再除以 2，得到 30 秒的基准成交额。</span></p>
@@ -593,16 +649,16 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             当前设置 {displayedSeconds} 秒 / {[
               displayedThresholds.up !== null ? `上涨 ${formatPercent.format(displayedThresholds.up)}%` : null,
               displayedThresholds.down !== null ? `下跌 ${formatPercent.format(displayedThresholds.down)}%` : null,
-            ].filter(Boolean).join(" / ")} / 成交额 ≥ {displayedMultiple} 倍 · {monitoringStatus}
+            ].filter(Boolean).join(" / ")} / 观察 {displayedObservation.minutes} 分钟 / 成交额 ≥ {displayedMultiple} 倍 · {monitoringStatus}
           </p>
           {directoryError && <p role="status">合约列表同步失败，正在重试。</p>}
           <div className={styles.monitorHelp}>
             <p><strong>告警怎么升级？</strong> 价格达到涨跌阈值时，先记入告警记录。每轮只有第一次告警要检查成交额。</p>
-            <p>例如窗口设为 30 秒、涨幅设为 5%。价格从 100 涨到 108，成交额达标就报 1 级。下一档从 105 算，再涨 5% 到 110.25 就报 2 级。如果一口气涨到 116，可以直接报 3 级。</p>
-            <p>每次升级都会重新计时。窗口内没到下一级，就重新找下一轮异动。上涨和下跌分别计级。</p>
+            <p>例如原始参考价为 100，首次涨到 105 且成交额达标，确认 1 级告警。观察期涨幅为 5% 时，之后达到 110.25、115.7625 时依次升级。观察期设为 15 分钟时，10:00 确认首报、10:10 升级，截止时间延到 10:25。</p>
+            <p>价格回撤后仍在原始参考价同一侧，就继续观察，只在达到新档位时升级。首次成交额核验失败或中断时，恢复短窗口监控。</p>
           </div>
           <p>监控币种深度调研名单里的全部币安 USDT 本位永续合约。{server
-            ? "启用后自动启动独立进程，关闭网页后继续监控。"
+            ? "启用状态保存在本地后台，关闭网页后继续监控。要停止监控，可重新打开本页关闭策略。"
             : background.mode === "browser" ? "请保持行情页打开。" : ""}</p>
         </section>
         <section className={`${styles.result} ${styles.monitorSettings}`} aria-labelledby="spike-continuation-heading">
@@ -619,27 +675,38 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             <label htmlFor="spike-lookback-hours">异动前回看（小时）</label>
             <input id="spike-lookback-hours" type="number" min={1} max={4_294_967_295} step={1} required value={lookbackInput}
               onChange={(event) => setLookbackInput(event.target.value)} />
-            <label htmlFor="spike-range-percent">历史振幅上限（%）</label>
+            <label htmlFor="spike-range-percent">历史振幅计分基准（%）</label>
             <input id="spike-range-percent" type="number" min={0} max={50} step="any" required value={rangeInput}
               onChange={(event) => setRangeInput(event.target.value)} />
             <label htmlFor="spike-score-turnover">评分基准成交额倍数</label>
             <input id="spike-score-turnover" type="number" min={1} step="any" required value={scoreTurnoverInput}
               onChange={(event) => setScoreTurnoverInput(event.target.value)} />
             <label htmlFor="spike-stop-loss">新开仓止损（%）</label>
-            <input id="spike-stop-loss" type="number" min={0.1} max={20} step="any" required value={spikeStopInput}
-              onChange={(event) => setSpikeStopInput(event.target.value)} />
+            <input id="spike-stop-loss" type="number" min={0.1} max={20} step="any" value={spikeStopInput}
+              onChange={(event) => setSpikeStopInput(event.target.value)}
+              onBlur={({ currentTarget }) => {
+                if (currentTarget.value === "" && !currentTarget.validity.badInput) {
+                  setSpikeStopInput(String(defaultContinuationRule.stopLossPercent));
+                }
+              }} />
             <label htmlFor="spike-take-profit">新开仓止盈（%）</label>
-            <input id="spike-take-profit" type="number" min={0.1} max={50} step="any" required value={spikeTakeInput}
-              onChange={(event) => setSpikeTakeInput(event.target.value)} />
+            <input id="spike-take-profit" type="number" min={0.1} max={50} step="any" value={spikeTakeInput}
+              onChange={(event) => setSpikeTakeInput(event.target.value)}
+              onBlur={({ currentTarget }) => {
+                if (currentTarget.value === "" && !currentTarget.validity.badInput) {
+                  setSpikeTakeInput(String(defaultContinuationRule.takeProfitPercent));
+                }
+              }} />
             <button type="submit" disabled={!canEdit}>保存评分与保护设置</button>
           </form>}
           {server && !trading.data?.enabled && <p>连接「账号设置」中的币安模拟盘或实盘后可启用自动下单。</p>}
           {background.mode === "browser" && <p>自动下单由本地后台监控执行。</p>}
           <div className={styles.monitorHelp}>
-            <p><strong>涨跌幅度（60%）</strong> 取异动窗口前 {continuation.lookbackHours} 小时的完整 K 线，按（最高价 − 最低价）÷ 最低价计算振幅。振幅 ≤ {continuation.maxRangePercent}% 得 60 分。</p>
-            <p><strong>告警成交额倍数（30%）</strong> 以 {continuation.turnoverMultiple} 倍为评分基准。告警时的倍数达到基准的 1、2、3 倍分别得 10、20、30 分，低于基准得 0 分。</p>
-            <p><strong>强平估算（10%）</strong> 读取「币种深度调研」的多空强平风险图。上涨时看多头，下跌时看空头。同向预估强平金额占优，且标记价 5% 范围内的预估金额至少占该方向的 20%，得 10 分。模型取不到时计 0 分。</p>
-            <p>每轮确认告警后评估一次。总分 ≥ 80 且开启自动下单时，上涨做多、下跌做空，以 1 倍杠杆提交币安允许的最小市价单。信号有效期 45 秒。</p>
+            <p><strong>突破站稳（35 分）</strong> 触发后 5 秒内始终守住门槛得 35 分，回吐后收复得 20 分，失守时跳过下单。</p>
+            <p><strong>同向主动成交（35 分）</strong> 上涨看主动买入占比，下跌看主动卖出占比。达到 55%、60%、65%、70% 分别得 10、20、30、35 分。</p>
+            <p><strong>告警成交额（20 分）</strong> 以 {continuation.turnoverMultiple} 倍为评分基准，达到基准的 1、2、3 倍分别得 5、10、15 分。成交额达到 1 万、10 万 USDT 分别加 3、5 分。</p>
+            <p><strong>异动前历史振幅（10 分）</strong> 取异动窗口前 {continuation.lookbackHours} 小时的完整 K 线。振幅 ≤ {continuation.maxRangePercent}% 得 10 分，超过基准但在两倍以内得 5 分，其他情况得 0 分。</p>
+            <p>首次确认告警后评估开仓。总分 ≥ 80 且开启自动下单时，上涨做多、下跌做空，以 1 倍杠杆提交币安允许的最小市价单。首次信号有效期 45 秒。</p>
             <p>开仓成交后，后台以实际成交均价为基准，先挂标记价止损 {continuation.stopLossPercent}% 和止盈 {continuation.takeProfitPercent}%，再在止盈距离的 75% 处挂限价平多或平空。价格按合约步长校准。最长持仓 5 分钟，到期自动撤单并市价平仓。</p>
           </div>
         </section>
@@ -651,7 +718,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   return (
     <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
       <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
-      <details id="account-settings" className={styles.monitorFeature}>
+      <details id="account-settings" className={styles.monitorFeature} {...accountDetails}>
         <summary className={styles.monitorSummary}><h3>账号设置</h3></summary>
         <div className={`${styles.monitorBody} ${styles.accountSettingsGrid}`}>
           <DingTalkSettings {...strategyNotifications} />

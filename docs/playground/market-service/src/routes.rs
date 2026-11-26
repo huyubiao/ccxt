@@ -40,7 +40,7 @@ pub fn router(
     notifier: Arc<Notifier>,
     trader: Option<Arc<Trader>>,
     token: Option<Arc<str>>,
-) -> crate::store::Result<(Router, Arc<crate::liquidation::Loader>)> {
+) -> crate::store::Result<Router> {
     let markets = Arc::new(Markets::new(Arc::clone(&binance))?);
     let research = Arc::new(crate::research::Research::new(Arc::clone(&markets))?);
     let liquidation = Arc::new(crate::liquidation::Loader::new(
@@ -87,12 +87,12 @@ pub fn router(
             markets,
             store,
             notifier,
-            liquidation: Arc::clone(&liquidation),
+            liquidation,
             research,
             holders,
             trader,
         });
-    Ok((app, liquidation))
+    Ok(app)
 }
 
 #[derive(Deserialize)]
@@ -470,7 +470,7 @@ async fn monitor_rule(
     let Some((rule, revision)) = rule else {
         return error(
             StatusCode::BAD_REQUEST,
-            "请检查告警时间窗口、涨跌幅、成交额倍数和延续评分参数。",
+            "请检查告警时间窗口、涨跌幅、成交额倍数、观察期和延续评分参数。",
         );
     };
     if rule.continuation.auto_trade {
@@ -819,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn internal_routes_require_a_server_token_before_reading_json() {
         let token: Arc<str> = "a".repeat(64).into();
-        let (app, _) = router(
+        let app = router(
             Arc::new(Binance::new()),
             None,
             Arc::new(Notifier::new(false).unwrap()),

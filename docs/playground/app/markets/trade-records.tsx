@@ -5,6 +5,7 @@ import { isTradeActive, STANDARD_TAKER_FEE_RATE, tradeExecution, tradingModeLabe
   type Trade, type TradeOrder, type TradingMode } from "@/lib/trading-types";
 import { marketNumberFormatter } from "@/lib/market-number";
 import { useRecordSelection } from "./use-record-selection";
+import { useRememberedDetails } from "./use-remembered-details";
 import styles from "./markets.module.css";
 
 const formatPrice = marketNumberFormatter({ maximumSignificantDigits: 10 });
@@ -19,7 +20,7 @@ const statusLabels: Record<Trade["status"], string> = {
   opening: "开仓中", open: "持仓中", closing: "平仓中", closed: "已平仓", failed: "失败",
 };
 const orderLabels: Record<TradeOrder["kind"], string> = {
-  entry: "开仓", "stop-loss": "止损", "take-profit": "止盈", exit: "平仓", "limit-exit": "限价平仓",
+  entry: "开仓", "add-entry": "补仓", "stop-loss": "止损", "take-profit": "止盈", exit: "平仓", "limit-exit": "限价平仓",
 };
 const orderStatusLabels: Record<TradeOrder["status"], string> = {
   placed: "已挂单", filled: "已成交", canceled: "已撤销", triggered: "已触发", failed: "失败",
@@ -55,7 +56,8 @@ function TradeDetails({ trade, execution }: { trade: Trade; execution: ReturnTyp
               {order.triggerPrice !== null ? ` 触发价 ${formatPrice(order.triggerPrice)}` : ""}
               {order.limitPrice != null ? ` 限价 ${formatPrice(order.limitPrice)}` : ""}
               {order.execution ? ` 成交均价 ${formatPrice(order.execution.quote / order.execution.filled)}` : ""} · {
-                order.kind === "limit-exit" && order.status === "placed" && order.execution ? "部分成交" : orderStatusLabels[order.status]}
+                order.kind === "limit-exit" && order.status === "placed" && order.execution ? "部分成交" :
+                  order.kind === "add-entry" && order.status === "placed" ? "待核对" : orderStatusLabels[order.status]}
               {order.exchangeId && <> · 订单号 {order.exchangeId}</>}
               {order.error && <> · {order.error}</>}
             </li>)}
@@ -144,6 +146,7 @@ export default function TradeRecords({ trades, activeMode, accountRevision, canD
   onClose: (tradeId: string) => Promise<unknown>;
   onManage: (request: PositionRequest) => Promise<unknown>;
 }) {
+  const details = useRememberedDetails("trade-records");
   const [closing, setClosing] = useState<string | null>(null);
   const [managing, setManaging] = useState(false);
   const [closeError, setCloseError] = useState("");
@@ -203,7 +206,7 @@ export default function TradeRecords({ trades, activeMode, accountRevision, canD
   }
 
   return (
-    <details className={styles.monitorFeature} open={active > 0}>
+    <details className={styles.monitorFeature} {...details}>
       <summary className={styles.monitorSummary}>
         <h3>下单记录 <small>{trades.length} 条{active ? ` · ${active} 笔进行中` : ""}</small></h3>
       </summary>

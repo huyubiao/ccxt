@@ -35,13 +35,14 @@ const { default: TradeRecords, PositionControls } = await import("./trade-record
 const { default: TestStrategy } = await import("./test-strategy.tsx");
 const { default: BinanceSettings } = await import("./binance-settings.tsx");
 const { mergeAlertHistory } = await import("../../lib/alert-history.ts");
+const { tradeExecution } = await import("../../lib/trading-types.ts");
 hooks.deregister();
 
 const emptyRecords = { records: [], canDelete: true, onDelete: async () => {} };
 const cases = [
   ["告警记录", AlertRecords, emptyRecords, [
     "全选", "交易对", "告警级别", "触发时间", "参考价/触发价 (USDT)", "当日涨跌幅度",
-    "窗口涨跌幅/阈值", "窗口 (秒)", "成交额 (USDT)", "核验结果", "延续评分与下单",
+    "涨跌幅 / 触发阈值", "监控窗口", "成交额 (USDT)", "核验结果", "延续评分与下单",
   ]],
   ["下单记录", TradeRecords, { trades: [], activeMode: "off", canDelete: true, onDelete: async () => {}, onClose: async () => {} }, [
     "全选", "交易对", "状态", "净盈亏 (USDT)", "实际成交均价", "手续费 (USDT)", "开仓时间", "操作",
@@ -59,19 +60,39 @@ for (const [label, Component, props, columns] of cases) {
   });
 }
 
-test("a scored alert shows the submitted direction and the three actual weights", () => {
+test("a scored alert shows the submitted direction, the three actual weights, and the breakout observation", () => {
   const spike = { symbol: "BTCUSDT", level: 1, time: 1, price: 95, previous: 100, change: -5, threshold: -5,
     seconds: 30, requiredMultiple: 3, status: "alerted" };
   const records = mergeAlertHistory([], [spike], [{ event: { ...spike, continuation: {
       status: "ordered", side: "short", target: 80,
       score: { total: 80, pricePoints: 60, turnoverPoints: 10, liquidationPoints: 10,
         rangePercent: 4.5, dominantSide: "short", nearSharePercent: 25 },
-    } } }]);
+    }, breakoutObservation: { status: "ready", windowSeconds: 5, buyUsdt: 150, sellUsdt: 350, netPercent: -40,
+      position: "recovered", targetPrice: 95, lastPrice: 94, lastTradeTime: 5000 } } }]);
   const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
   assert.match(html, /80 分 · 做空 · 已开仓/);
   assert.match(html, /涨跌幅 60\/60（振幅 4.5%）/);
   assert.match(html, /成交额 10\/30/);
   assert.match(html, /强平 10\/10（空头占优，同向近价占比 25%）/);
+  assert.match(html, /触发后 5 秒主动成交 · 买入 30% · 卖出 70%/);
+  assert.match(html, /突破后走势 · 回吐后收复（门槛价 95，最后成交价 94）/);
+});
+
+test("the new score shows all four weights and explains why a lost breakout skips entry", () => {
+  const spike = { symbol: "BTCUSDT", level: 2, time: 1, price: 111, previous: 105, originalReference: 100, change: 5.71, threshold: 5,
+    seconds: 30, requiredMultiple: 3, status: "alerted" };
+  const records = mergeAlertHistory([], [spike], [{ event: { ...spike, continuation: {
+      status: "breakout-lost", side: "long", target: 80,
+      score: { total: 55, pricePoints: 0, turnoverPoints: 20, breakoutPoints: 0, flowPoints: 35, rangePercent: 40.54 },
+    } } }]);
+  const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+  assert.match(html, /55 分 · 做多 · 突破失守，跳过下单/);
+  assert.match(html, /105 \/ 111<div>原始参考价 100<\/div>/);
+  assert.match(html, /突破站稳 0\/35/);
+  assert.match(html, /同向主动成交 35\/35/);
+  assert.match(html, /成交额 20\/20/);
+  assert.match(html, /历史振幅 0\/10（40\.54%）/);
+  assert.doesNotMatch(html, /强平 0\/10/);
 });
 
 test("trade selection includes finished trades and protects active trades", () => {
@@ -87,6 +108,7 @@ test("trade selection includes finished trades and protects active trades", () =
     ],
     activeMode: "demo", canDelete: true, onDelete: async () => {}, onClose: async () => {},
   }));
+  assert.match(html, /^<details(?![^>]*\bopen=)[^>]*>/);
   const checkboxes = [...html.matchAll(/<input[^>]+type="checkbox"[^>]*>/g)].map(([input]) => input);
   assert.equal(checkboxes.length, 3);
   assert.doesNotMatch(checkboxes[0], /disabled=""/);
@@ -127,6 +149,17 @@ test("trade rows show confirmed fills and combined fees with details collapsed",
   assert.match(html, /\+7\.896/);
   assert.match(html, /aria-expanded="false">详情/);
   assert.doesNotMatch(html, /止损 \/ 止盈触发价|>订单明细</);
+});
+
+test("an addition contributes to entry price, fees and PnL on the original trade", () => {
+  const execution = tradeExecution({ side: "long", orders: [
+    { kind: "entry", execution: { filled: 2, quote: 200 } },
+    { kind: "add-entry", execution: { filled: 1, quote: 94 } },
+    { kind: "exit", execution: { filled: 3, quote: 330 } },
+  ] });
+  assert.equal(execution.entryPrice, 98);
+  assert.equal(execution.entryFee?.toFixed(3), "0.147");
+  assert.equal(execution.netPnl?.toFixed(3), "35.688");
 });
 
 test("trade records limit each page while preserving cross-page select all", () => {

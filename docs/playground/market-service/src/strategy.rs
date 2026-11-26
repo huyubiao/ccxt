@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +13,41 @@ const MAX_TURNOVER_MULTIPLE: f64 = 100.0;
 const BASELINE_MINUTES: usize = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ObservationRule {
+    pub minutes: u32,
+    pub up_percent: f64,
+    pub down_percent: f64,
+}
+
+impl Default for ObservationRule {
+    fn default() -> Self {
+        Self {
+            minutes: 15,
+            up_percent: 5.0,
+            down_percent: 5.0,
+        }
+    }
+}
+
+impl ObservationRule {
+    fn signed_step(self, direction: f64) -> f64 {
+        if direction < 0.0 {
+            -self.down_percent
+        } else {
+            self.up_percent
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        self.minutes > 0
+            && [self.up_percent, self.down_percent]
+                .into_iter()
+                .all(|percent| percent > 0.0 && percent <= MAX_PERCENT)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rule {
     pub enabled: bool,
@@ -22,6 +56,8 @@ pub struct Rule {
     pub down: Option<f64>,
     pub seconds: u32,
     pub turnover_multiple: f64,
+    #[serde(default)]
+    pub observation: ObservationRule,
     #[serde(default)]
     pub continuation: ContinuationRule,
 }
@@ -61,6 +97,7 @@ impl Rule {
                 .is_none_or(|down| (-MAX_PERCENT..=-MIN_PERCENT).contains(&down))
             && (MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).contains(&self.seconds)
             && (MIN_TURNOVER_MULTIPLE..=MAX_TURNOVER_MULTIPLE).contains(&self.turnover_multiple)
+            && self.observation.is_valid()
             && self.continuation.lookback_hours >= 1
             && (0.0..=50.0).contains(&self.continuation.max_range_percent)
             && self.continuation.turnover_multiple.is_finite()
@@ -89,6 +126,7 @@ impl Default for Rule {
             down: Some(-5.0),
             seconds: 30,
             turnover_multiple: 3.0,
+            observation: ObservationRule::default(),
             continuation: ContinuationRule::default(),
         }
     }
@@ -104,22 +142,13 @@ pub struct Sample {
 pub struct Move {
     pub level: u32,
     pub previous: f64,
+    pub original_reference: f64,
+    pub first_trigger_time: i64,
     pub target: f64,
+    pub threshold: f64,
     pub sample: Sample,
     pub change: f64,
-}
-
-impl Move {
-    pub fn forecast(self, latest: Option<Sample>) -> &'static str {
-        let latest_price = latest.map_or(self.sample.price, |sample| sample.price);
-        if latest_price > self.sample.price
-            || (latest_price == self.sample.price && self.change > 0.0)
-        {
-            "up"
-        } else {
-            "down"
-        }
-    }
+    pub observation_minutes: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -165,34 +194,119 @@ pub fn turnover_baseline(minutes: &[Option<f64>], seconds: u32) -> Option<f64> {
 #[derive(Debug)]
 struct Series {
     latest: Move,
-    volume: Option<Volume>,
+    highest_band: u32,
+    volume: Volume,
+    last_alert_time: i64,
+}
+
+impl Series {
+    fn new(first: Move, rule: ObservationRule, volume: Volume, confirmed_at: i64) -> Self {
+        let log_step = (rule.signed_step(first.threshold) / 100.0).ln_1p();
+        let highest_band = reached_band(first.original_reference, first.sample.price, log_step);
+        Self {
+            latest: first,
+            highest_band,
+            volume,
+            last_alert_time: confirmed_at,
+        }
+    }
+
+    fn upgrade(&mut self, sample: Sample, rule: ObservationRule) -> Option<Move> {
+        let reference = self.latest.original_reference;
+        let threshold = rule.signed_step(self.latest.threshold);
+        let log_step = (threshold / 100.0).ln_1p();
+        let band = reached_band(reference, sample.price, log_step);
+        if band <= self.highest_band {
+            return None;
+        }
+        let level = self.latest.level.saturating_add(band - self.highest_band);
+        let previous = reference * (log_step * f64::from(band - 1)).exp();
+        let target = reference * (log_step * f64::from(band)).exp();
+        let change = (sample.price - previous) / previous * 100.0;
+        if level == self.latest.level || !change.is_finite() || !target.is_finite() || target <= 0.0 {
+            return None;
+        }
+        self.highest_band = band;
+        self.last_alert_time = sample.time;
+        self.latest = Move {
+            level,
+            previous,
+            target,
+            threshold,
+            sample,
+            change,
+            observation_minutes: Some(rule.minutes),
+            ..self.latest
+        };
+        Some(self.latest)
+    }
+}
+
+fn reached_band(reference: f64, price: f64, log_step: f64) -> u32 {
+    if !log_step.is_finite() || log_step == 0.0 {
+        return 0;
+    }
+    let bands = (price / reference).ln() / log_step;
+    // Absorb rounding at an exact threshold before converting it to a band.
+    let tolerance = (f64::EPSILON * 8.0 * (bands.abs() + 1.0 / log_step.abs())).min(0.000_001);
+    (bands + tolerance).floor() as u32
 }
 
 #[derive(Debug)]
-pub struct PendingCheck(Arc<Mutex<Series>>);
-
-#[derive(Debug)]
 pub enum Detection {
-    CheckTurnover(Move, PendingCheck),
+    CheckTurnover(Move),
     Confirmed(Move, Volume),
 }
 
 #[derive(Default)]
 pub struct PriceWindow {
     samples: VecDeque<Sample>,
-    baseline: Option<Sample>,
-    series: Option<Arc<Mutex<Series>>>,
+    latest: Option<Sample>,
+    pending: Option<Move>,
+    series: Option<Series>,
+}
+
+fn returned_to_reference(movement: Move, price: f64) -> bool {
+    if movement.threshold > 0.0 {
+        price <= movement.original_reference
+    } else {
+        price >= movement.original_reference
+    }
 }
 
 impl PriceWindow {
-    pub fn observe(&mut self, sample: Sample, threshold: f64, seconds: u32) -> Option<Detection> {
+    pub fn observe(&mut self, sample: Sample, rule: Rule) -> Option<Detection> {
         if !sample.price.is_finite()
             || sample.price <= 0.0
             || sample.time <= self.latest().map_or(0, |last| last.time)
         {
             return None;
         }
-        let cutoff = sample.time - i64::from(seconds) * 1_000;
+        let previous = self.latest.replace(sample);
+        if let Some(pending) = self.pending {
+            if returned_to_reference(pending, sample.price) {
+                self.pending = None;
+                self.samples.push_back(sample);
+            }
+            return None;
+        }
+        if let Some(series) = &mut self.series {
+            let elapsed = sample.time - series.last_alert_time;
+            if !returned_to_reference(series.latest, sample.price)
+                && elapsed < i64::from(rule.observation.minutes) * 60_000
+            {
+                if elapsed < 0 {
+                    return None;
+                }
+                let next = series.upgrade(sample, rule.observation)?;
+                return Some(Detection::Confirmed(next, series.volume));
+            }
+            self.series = None;
+            self.samples.push_back(sample);
+            return None;
+        }
+
+        let cutoff = sample.time - i64::from(rule.seconds) * 1_000;
         while self
             .samples
             .front()
@@ -200,91 +314,60 @@ impl PriceWindow {
         {
             self.samples.pop_front();
         }
-        if let Some(active) = &self.series {
-            let mut series = active.lock().expect("price series lock poisoned");
-            if series.latest.sample.time >= cutoff {
-                let next =
-                    crossed_level(series.latest.target, series.latest.level, sample, threshold);
-                if let Some(next) = next {
-                    series.latest = next;
-                    self.samples.clear();
-                }
-                self.samples.push_back(sample);
-                return next
-                    .zip(series.volume)
-                    .map(|(next, volume)| Detection::Confirmed(next, volume));
-            }
-        }
-        if self.series.take().is_some()
-            || self
-                .baseline
-                .is_some_and(|baseline| baseline.time <= cutoff)
-        {
-            self.baseline = None;
-        }
-        let reference = self.baseline.unwrap_or_else(|| {
-            self.samples.iter().copied().fold(sample, |extreme, prior| {
-                if (threshold < 0.0 && prior.price > extreme.price)
-                    || (threshold > 0.0 && prior.price < extreme.price)
-                {
-                    prior
+        let directions = if previous.is_some_and(|previous| sample.price < previous.price) {
+            [rule.down, rule.up]
+        } else {
+            [rule.up, rule.down]
+        };
+        let first = directions.into_iter().flatten().find_map(|threshold| {
+            let reference = self.samples.iter().fold(sample.price, |extreme, prior| {
+                if threshold > 0.0 {
+                    extreme.min(prior.price)
                 } else {
-                    extreme
+                    extreme.max(prior.price)
                 }
-            })
+            });
+            first_move(reference, sample, threshold)
         });
-        let change = (sample.price - reference.price) / reference.price * 100.0;
-        let at_threshold =
-            (change - threshold).abs() <= f64::EPSILON * 100.0_f64.max(threshold.abs());
-        let triggered = at_threshold
-            || if threshold < 0.0 {
-                change < threshold
-            } else {
-                change > threshold
-            };
-        if triggered {
-            self.baseline = Some(sample);
-            self.samples.clear();
-        }
-        self.samples.push_back(sample);
-        let first = triggered
-            .then(|| crossed_level(reference.price, 0, sample, threshold))
-            .flatten()?;
-        let series = Arc::new(Mutex::new(Series {
-            latest: first,
-            volume: None,
-        }));
-        self.series = Some(Arc::clone(&series));
-        Some(Detection::CheckTurnover(first, PendingCheck(series)))
+        let Some(first) = first else {
+            self.samples.push_back(sample);
+            return None;
+        };
+        self.samples.clear();
+        self.pending = Some(first);
+        Some(Detection::CheckTurnover(first))
     }
 
-    pub fn settle(&mut self, pending: PendingCheck, volume: Option<Volume>) -> Option<Move> {
-        if let Some(volume) = volume {
-            let mut series = pending.0.lock().expect("price series lock poisoned");
-            series.volume = Some(volume);
-            return Some(series.latest);
+    pub fn settle(&mut self, started_at: i64, rule: ObservationRule, confirmation: Option<(Volume, i64)>) {
+        let Some(first) = self.pending.filter(|pending| pending.first_trigger_time == started_at) else {
+            return;
+        };
+        self.pending = None;
+        if let Some((volume, confirmed_at)) = confirmation {
+            self.series = Some(Series::new(first, rule, volume, confirmed_at));
+        } else {
+            self.samples.extend(self.latest);
         }
-        if self
-            .series
-            .as_ref()
-            .is_some_and(|series| Arc::ptr_eq(series, &pending.0))
-        {
-            self.series = None;
-            self.baseline = None;
-        }
-        None
+    }
+
+    pub fn has_pending_series(&self, started_at: i64) -> bool {
+        self.pending.is_some_and(|pending| pending.first_trigger_time == started_at)
+    }
+
+    pub fn has_confirmed_series(&self) -> bool {
+        self.series.is_some()
     }
 
     pub fn latest(&self) -> Option<Sample> {
-        self.samples.back().copied()
+        self.latest
     }
 }
 
-fn crossed_level(start: f64, start_level: u32, sample: Sample, threshold: f64) -> Option<Move> {
+fn first_move(original_reference: f64, sample: Sample, threshold: f64) -> Option<Move> {
     let factor = 1.0 + threshold / 100.0;
-    let mut level = start_level;
-    let mut target = start;
-    let mut previous = start;
+    let mut level = 0;
+    let mut target = original_reference;
+    let mut previous = original_reference;
     loop {
         let next = target * factor;
         if !next.is_finite() || next <= 0.0 || next == target {
@@ -304,12 +387,16 @@ fn crossed_level(start: f64, start_level: u32, sample: Sample, threshold: f64) -
         target = next;
         level += 1;
     }
-    (level != start_level).then(|| Move {
+    (level > 0).then(|| Move {
         level,
         previous,
+        original_reference,
+        first_trigger_time: sample.time,
         target,
+        threshold,
         sample,
         change: (sample.price - previous) / previous * 100.0,
+        observation_minutes: None,
     })
 }
 
@@ -333,6 +420,9 @@ mod tests {
             Rule { down: Some(-100.01), ..rule },
             Rule { turnover_multiple: 1.99, ..rule },
             Rule { turnover_multiple: 100.01, ..rule },
+            Rule { observation: ObservationRule { minutes: 0, ..rule.observation }, ..rule },
+            Rule { observation: ObservationRule { up_percent: 0.0, ..rule.observation }, ..rule },
+            Rule { observation: ObservationRule { down_percent: 101.0, ..rule.observation }, ..rule },
         ] {
             assert!(!invalid.is_valid());
         }
@@ -343,51 +433,167 @@ mod tests {
     }
 
     #[test]
-    fn confirms_highest_level_reached_while_turnover_is_pending() {
+    fn starts_observing_after_confirmation_and_ignores_earlier_upgrades() {
         let mut window = PriceWindow::default();
-        assert!(window.observe(sample(1_000, 100.0), 5.0, 30).is_none());
-        let Some(Detection::CheckTurnover(first, check)) =
-            window.observe(sample(2_000, 106.0), 5.0, 30)
+        let rule = Rule { down: None, ..Rule::default() };
+        assert!(window.observe(sample(1_000, 100.0), rule).is_none());
+        let Some(Detection::CheckTurnover(first)) =
+            window.observe(sample(2_000, 106.0), rule)
         else {
             panic!("expected a turnover check");
         };
         assert_eq!(first.level, 1);
-        assert!(window.observe(sample(3_000, 111.0), 5.0, 30).is_none());
-        assert!(window.observe(sample(2_500, 130.0), 5.0, 30).is_none());
+        assert!(window.observe(sample(3_000, 111.0), rule).is_none());
+        assert!(window.observe(sample(2_500, 130.0), rule).is_none());
         let volume = Volume::new(Some(390_000.0), Some(120_000.0));
-        assert_eq!(window.settle(check, Some(volume)).unwrap().level, 2);
+        assert!(!window.has_confirmed_series());
+        window.settle(first.sample.time, rule.observation, Some((volume, 5_000)));
+        assert_eq!(window.series.as_ref().unwrap().latest, first);
+        assert!(window.observe(sample(4_999, 122.0), rule).is_none());
+        assert!(window.observe(sample(99_000, 110.2499), rule).is_none());
         let Some(Detection::Confirmed(next, same_volume)) =
-            window.observe(sample(4_000, 116.0), 5.0, 30)
+            window.observe(sample(100_000, 110.25), rule)
         else {
             panic!("expected the next level to keep the confirmed volume");
         };
-        assert_eq!(next.level, 3);
+        assert_eq!(next.level, 2);
+        assert_eq!(next.first_trigger_time, first.sample.time);
+        assert_eq!(next.original_reference, 100.0);
+        assert_eq!(next.threshold, 5.0);
+        assert!((next.previous - 105.0).abs() < 1e-10);
+        assert!((next.target - 110.25).abs() < 1e-10);
+        assert_eq!(next.observation_minutes, Some(15));
         assert_eq!(same_volume, volume);
     }
 
     #[test]
-    fn expired_check_cannot_cancel_a_new_series() {
+    fn compounded_observation_bands_follow_the_first_direction_until_return() {
+        let volume = Volume::new(Some(6.0), Some(2.0));
+        let rule = Rule {
+            up: Some(3.0), down: Some(-3.0),
+            observation: ObservationRule { minutes: 8, up_percent: 4.0, down_percent: 6.0 },
+            ..Rule::default()
+        };
         let mut window = PriceWindow::default();
-        window.observe(sample(1_000, 100.0), -5.0, 10);
-        let Some(Detection::CheckTurnover(_, old)) = window.observe(sample(2_000, 95.0), -5.0, 10)
+        window.observe(sample(1_000, 100.0), rule);
+        let Some(Detection::CheckTurnover(first)) = window.observe(sample(2_000, 103.0), rule) else {
+            panic!("expected initial check");
+        };
+        assert_eq!(first.level, 1);
+        window.settle(first.sample.time, rule.observation, Some((volume, first.sample.time)));
+        assert!(window.observe(sample(3_000, 103.9), rule).is_none());
+        for (time, price, level) in [(4_000, 104.0, 2), (96_000, 108.16, 3)] {
+            let Some(Detection::Confirmed(upgrade, _)) = window.observe(sample(time, price), rule) else {
+                panic!("expected upgrade in the same series");
+            };
+            assert_eq!((upgrade.level, upgrade.threshold), (level, 4.0));
+            assert_eq!(upgrade.original_reference, 100.0);
+            assert_eq!(upgrade.first_trigger_time, first.sample.time);
+        }
+        assert!(window.observe(sample(97_000, 101.0), rule).is_none());
+        assert!(window.observe(sample(98_000, 108.16), rule).is_none());
+        assert!(window.observe(sample(99_000, 100.0), rule).is_none());
+        assert!(window.series.is_none());
+        let Some(Detection::CheckTurnover(down)) = window.observe(sample(100_000, 97.0), rule) else {
+            panic!("expected a new round in the opposite direction");
+        };
+        assert_eq!(down.threshold, -3.0);
+        window.settle(down.sample.time, rule.observation, Some((volume, down.sample.time)));
+        assert!(window.observe(sample(101_000, 94.01), rule).is_none());
+        for (time, price, level) in [(102_000, 94.0, 2), (103_000, 88.36, 3)] {
+            let Some(Detection::Confirmed(upgrade, _)) = window.observe(sample(time, price), rule) else {
+                panic!("expected a downward upgrade");
+            };
+            assert_eq!((upgrade.level, upgrade.threshold), (level, -6.0));
+            assert_eq!(upgrade.original_reference, 100.0);
+        }
+        assert!(window.observe(sample(104_000, 100.01), rule).is_none());
+        assert!(window.series.is_none());
+    }
+
+    #[test]
+    fn exited_pending_check_cannot_confirm_or_cancel_a_new_series() {
+        let mut window = PriceWindow::default();
+        let rule = Rule { up: None, seconds: 10, observation: ObservationRule { minutes: 1, ..ObservationRule::default() }, ..Rule::default() };
+        window.observe(sample(1_000, 100.0), rule);
+        let Some(Detection::CheckTurnover(old)) = window.observe(sample(2_000, 95.0), rule)
         else {
             panic!("expected initial check");
         };
-        window.observe(sample(20_000, 100.0), -5.0, 10);
-        let Some(Detection::CheckTurnover(_, new)) = window.observe(sample(21_000, 94.0), -5.0, 10)
+        assert!(window.observe(sample(3_000, 100.1), rule).is_none());
+        assert!(!window.has_pending_series(old.sample.time));
+        let Some(Detection::CheckTurnover(new)) = window.observe(sample(4_000, 94.0), rule)
         else {
             panic!("expected a fresh check");
         };
-        window.settle(old, None);
         let volume = Volume::new(Some(6.0), Some(2.0));
-        assert_eq!(
-            window.settle(new, Some(volume)).unwrap().sample.time,
-            21_000
-        );
+        window.settle(old.sample.time, rule.observation, Some((volume, 4_001)));
+        window.settle(old.sample.time, rule.observation, None);
+        assert!(!window.has_confirmed_series());
+        window.settle(new.sample.time, rule.observation, Some((volume, 4_002)));
+        assert_eq!(window.series.as_ref().unwrap().latest, new);
         assert!(matches!(
-            window.observe(sample(22_000, 89.0), -5.0, 10),
+            window.observe(sample(5_000, 89.0), rule),
             Some(Detection::Confirmed(_, _))
         ));
+    }
+
+    #[test]
+    fn failed_turnover_allows_a_fresh_short_window_trigger() {
+        let mut window = PriceWindow::default();
+        let rule = Rule {
+            observation: ObservationRule { minutes: 1, ..ObservationRule::default() },
+            ..Rule::default()
+        };
+        window.observe(sample(1_000, 100.0), rule);
+        assert!(matches!(window.observe(sample(2_000, 105.0), rule), Some(Detection::CheckTurnover(_))));
+        assert!(window.observe(sample(3_000, 110.25), rule).is_none());
+        window.settle(2_000, rule.observation, None);
+        assert!(!window.has_confirmed_series());
+        assert!(!window.has_pending_series(2_000));
+        let volume = Volume::new(Some(6.0), Some(2.0));
+        window.settle(2_000, rule.observation, Some((volume, 3_001)));
+        assert!(!window.has_confirmed_series());
+        let Some(Detection::CheckTurnover(next)) = window.observe(sample(4_000, 116.0), rule) else {
+            panic!("expected a new check after rejection");
+        };
+        assert_eq!((next.level, next.original_reference), (1, 110.25));
+    }
+
+    #[test]
+    fn reconnect_retains_only_confirmed_series() {
+        let mut window = PriceWindow::default();
+        let rule = Rule::default();
+        window.observe(sample(1_000, 100.0), rule);
+        assert!(!window.has_confirmed_series());
+        assert!(matches!(window.observe(sample(2_000, 105.0), rule), Some(Detection::CheckTurnover(_))));
+        assert!(window.has_pending_series(2_000));
+        assert!(!window.has_confirmed_series());
+        let volume = Volume::new(Some(6.0), Some(2.0));
+        window.settle(2_000, rule.observation, Some((volume, 3_000)));
+        assert!(window.has_confirmed_series());
+    }
+
+    #[test]
+    fn each_upgrade_resets_the_configured_deadline() {
+        let mut window = PriceWindow::default();
+        let rule = Rule { down: None, observation: ObservationRule { minutes: 2, ..ObservationRule::default() }, ..Rule::default() };
+        let tick = |window: &mut PriceWindow, time, price| window.observe(sample(time, price), rule);
+        tick(&mut window, 1_000, 100.0);
+        assert!(matches!(tick(&mut window, 2_000, 105.0), Some(Detection::CheckTurnover(_))));
+        window.settle(2_000, rule.observation, Some((Volume::new(Some(6.0), Some(2.0)), 5_000)));
+        assert!(matches!(tick(&mut window, 124_999, 111.0), Some(Detection::Confirmed(_, _))));
+        assert!(tick(&mut window, 125_000, 112.0).is_none());
+        assert!(matches!(tick(&mut window, 200_000, 115.7625), Some(Detection::Confirmed(Move { level: 3, .. }, _))));
+        assert!(tick(&mut window, 319_998, 101.0).is_none());
+        assert!(tick(&mut window, 319_999, 115.7625).is_none());
+        assert!(window.series.is_some());
+        assert!(tick(&mut window, 320_000, 121.56).is_none());
+        assert!(window.series.is_none());
+        let Some(Detection::CheckTurnover(new)) = tick(&mut window, 321_000, 128.0) else {
+            panic!("expected a new series after the observation deadline");
+        };
+        assert_eq!((new.level, new.original_reference), (1, 121.56));
     }
 
     #[test]

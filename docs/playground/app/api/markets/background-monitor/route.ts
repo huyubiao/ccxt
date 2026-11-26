@@ -26,7 +26,7 @@ async function write(request: Request, forbidden: string, invalid: string, media
 }
 
 export function PUT(request: Request) {
-  return write(request, "当前请求无法修改后台监控设置。", "请检查告警时间窗口、涨跌幅、成交额倍数和延续评分参数。", "需要 JSON 规则。");
+  return write(request, "当前请求无法修改后台监控设置。", "请检查告警时间窗口、涨跌幅、成交额倍数、观察期和延续评分参数。", "需要 JSON 规则。");
 }
 
 export function DELETE(request: Request) {

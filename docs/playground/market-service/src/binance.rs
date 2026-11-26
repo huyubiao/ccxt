@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::now_ms;
-use crate::strategy::{turnover_baseline, Volume};
+use crate::strategy::{turnover_baseline, Sample, Volume};
 
 const MINUTE: i64 = 60_000;
 const TRADE_PAGE_SIZE: usize = 1_000;
@@ -208,19 +208,23 @@ impl Binance {
         let first_minute = (start + MINUTE - 1).div_euclid(MINUTE) * MINUTE;
         let last_minute = end.div_euclid(MINUTE) * MINUTE;
         if first_minute > last_minute {
-            return self.trade_turnover(&contract.id, start, end).await.ok();
+            return self
+                .trade_window(&contract.id, start, end)
+                .await
+                .ok()
+                .map(|trades| trades.total);
         }
         let (middle, head, tail) = tokio::join!(
             self.minute_turnover(&contract.id, first_minute, last_minute),
-            self.trade_turnover(&contract.id, start, first_minute),
-            self.trade_turnover(&contract.id, last_minute, end),
+            self.trade_window(&contract.id, start, first_minute),
+            self.trade_window(&contract.id, last_minute, end),
         );
         let middle = middle.ok()?;
         let total = (first_minute..last_minute)
             .step_by(MINUTE as usize)
             .try_fold(0.0, |sum, time| Some(sum + middle.get(&time)?))?
-            + head.ok()?
-            + tail.ok()?;
+            + head.ok()?.total
+            + tail.ok()?.total;
         total.is_finite().then_some(total)
     }
 
@@ -270,16 +274,16 @@ impl Binance {
             .collect())
     }
 
-    async fn trade_turnover(
+    pub(crate) async fn trade_window(
         &self,
         symbol: &str,
         start: i64,
         end: i64,
-    ) -> Result<f64, UpstreamError> {
+    ) -> Result<TradeWindow, UpstreamError> {
+        let mut trades = TradeWindow::default();
         if start >= end {
-            return Ok(0.0);
+            return Ok(trades);
         }
-        let mut total = 0.0;
         let mut from_id = None;
         for _ in 0..MAX_TRADE_PAGES {
             let query = match from_id {
@@ -293,19 +297,13 @@ impl Binance {
                 .iter()
                 .filter(|trade| (start..end).contains(&trade.time))
             {
-                let amount = number(&trade.price)
-                    .zip(number(&trade.quantity))
-                    .map(|(p, q)| p * q)
-                    .ok_or(UpstreamError::Unavailable)?;
-                if !amount.is_finite() || amount < 0.0 {
-                    return Err(UpstreamError::Unavailable);
-                }
-                total += amount;
+                trades.add(trade)?;
             }
             if page.len() < TRADE_PAGE_SIZE || page.last().is_some_and(|last| last.time >= end) {
-                return total
+                return trades
+                    .total
                     .is_finite()
-                    .then_some(total)
+                    .then_some(trades)
                     .ok_or(UpstreamError::Unavailable);
             }
             let last = page.last().ok_or(UpstreamError::Unavailable)?;
@@ -361,7 +359,39 @@ struct AggregateTrade {
     #[serde(rename = "q")]
     quantity: Value,
     #[serde(rename = "m")]
-    _buyer_is_maker: bool,
+    buyer_is_maker: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct TradeWindow {
+    pub total: f64,
+    pub taker_buy: f64,
+    pub low: f64,
+    pub high: f64,
+    pub last: Option<Sample>,
+}
+
+impl TradeWindow {
+    fn add(&mut self, trade: &AggregateTrade) -> Result<(), UpstreamError> {
+        let price = number(&trade.price).ok_or(UpstreamError::Unavailable)?;
+        let quantity = number(&trade.quantity).ok_or(UpstreamError::Unavailable)?;
+        let amount = price * quantity;
+        if !amount.is_finite() || price <= 0.0 || quantity < 0.0 {
+            return Err(UpstreamError::Unavailable);
+        }
+        self.total += amount;
+        if !trade.buyer_is_maker {
+            self.taker_buy += amount;
+        }
+        if amount > 0.0 {
+            self.low = self.last.map_or(price, |_| self.low.min(price));
+            self.high = self.high.max(price);
+            if self.last.is_none_or(|last| trade.time >= last.time) {
+                self.last = Some(Sample { time: trade.time, price });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -411,6 +441,23 @@ pub fn number(value: &Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trade_window_uses_the_taker_side_and_keeps_the_price_extremes() {
+        let mut trades = TradeWindow::default();
+        for trade in [
+            json!({"a":1,"T":1000,"p":"105.00","q":"2","m":false}),
+            json!({"a":2,"T":2000,"p":"104.00","q":"1","m":true}),
+            json!({"a":3,"T":2000,"p":"106.00","q":"1","m":false}),
+        ] {
+            trades.add(&serde_json::from_value(trade).unwrap()).unwrap();
+        }
+        assert_eq!(trades.total, 420.0);
+        assert_eq!(trades.taker_buy, 316.0);
+        assert_eq!(trades.low, 104.0);
+        assert_eq!(trades.high, 106.0);
+        assert_eq!(trades.last, Some(Sample { time: 2000, price: 106.0 }));
+    }
 
     #[test]
     fn directory_keeps_only_trading_usdt_crypto_perpetuals() {

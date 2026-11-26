@@ -7,7 +7,7 @@ export const STANDARD_TAKER_FEE_RATE = 0.0005;
 export type TradeExecution = { filled: number; quote: number };
 
 export type TradeOrder = {
-  kind: "entry" | "stop-loss" | "take-profit" | "exit" | "limit-exit";
+  kind: "entry" | "add-entry" | "stop-loss" | "take-profit" | "exit" | "limit-exit";
   side: "buy" | "sell";
   amount: number;
   triggerPrice: number | null;
@@ -106,7 +106,7 @@ export function tradeExecution(trade: Pick<Trade, "side" | "orders">) {
     const execution = order.execution;
     if (!execution || !Number.isFinite(execution.filled) || !Number.isFinite(execution.quote) ||
         execution.filled <= 0 || execution.quote <= 0) continue;
-    const leg = order.kind === "entry" ? entry : exit;
+    const leg = order.kind === "entry" || order.kind === "add-entry" ? entry : exit;
     leg.filled += execution.filled;
     leg.quote += execution.quote;
   }

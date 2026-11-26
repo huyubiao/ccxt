@@ -1,4 +1,4 @@
-import type { BackgroundRecord, ContinuationResult } from "./background-monitor-types";
+import type { BackgroundRecord, BreakoutObservation, ContinuationResult } from "./background-monitor-types";
 import { spikeKey, type SpikeRecord } from "./price-alerts";
 
 export const SPIKE_RECORD_LIMIT = 100;
@@ -14,7 +14,11 @@ export const spikeStatusLabels: Record<SpikeRecord["status"], string> = {
   interrupted: "核验已中断",
 };
 
-export type AlertHistoryRow = SpikeRecord & { legacyMultiple?: number | null; continuation?: ContinuationResult };
+export type AlertHistoryRow = SpikeRecord & {
+  legacyMultiple?: number | null;
+  continuation?: ContinuationResult;
+  breakoutObservation?: BreakoutObservation;
+};
 
 export function mergeAlertHistory(
   browser: readonly SpikeRecord[], server: readonly SpikeRecord[] = [], confirmed: readonly BackgroundRecord[] = [],
@@ -28,7 +32,9 @@ export function mergeAlertHistory(
     const confirmedRow = rows.get(key);
     rows.set(key, row.status === "alerted" && confirmedRow?.status === "alerted"
       ? { ...row, volume: row.volume ?? confirmedRow.volume, legacyMultiple: confirmedRow.legacyMultiple,
-        continuation: confirmedRow.continuation }
+        originalReference: row.originalReference ?? confirmedRow.originalReference,
+        observationMinutes: row.observationMinutes ?? confirmedRow.observationMinutes,
+        continuation: confirmedRow.continuation, breakoutObservation: confirmedRow.breakoutObservation }
       : row);
   }
   return [...rows.values()].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT);

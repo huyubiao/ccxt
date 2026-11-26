@@ -5,6 +5,12 @@ import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { createInterface } from "node:readline";
 
+const [mode, ...extraArgs] = process.argv.slice(2);
+if (extraArgs.length || (mode !== undefined && mode !== "--production")) {
+  console.error("用法：node scripts/start-rust-markets.mjs [--production]");
+  process.exit(1);
+}
+
 for (const file of [".env.local", ".env"]) {
   if (existsSync(file)) loadEnvFile(file);
 }
@@ -12,8 +18,7 @@ for (const file of [".env.local", ".env"]) {
 const marketService = resolve("market-service");
 const manifest = resolve(marketService, "Cargo.toml");
 const target = resolve(marketService, "target");
-const production = process.argv[2] === "--production";
-const monitorOnly = process.argv[2] === "--monitor-only";
+const production = mode === "--production";
 const appPort = process.env.PLAYGROUND_PORT || process.env.PORT || "3000";
 const children = new Set();
 const stopping = new AbortController();
@@ -141,15 +146,11 @@ try {
   const backendUrl = await ready(backend.child.stdout, backendExit);
   stopping.signal.throwIfAborted();
   console.log(`Rust 行情服务已启动（${backendUrl}）。`);
-  if (monitorOnly) {
-    await backendExit;
-  } else {
-    const args = ["node_modules/next/dist/bin/next", production ? "start" : "dev",
-      "--hostname", production ? "0.0.0.0" : "127.0.0.1", "--port", appPort];
-    const next = start(process.execPath, args, { env: { ...env, PLAYGROUND_MARKET_SERVICE_URL: backendUrl } });
-    const outcome = await Promise.race([next.done, backendExit]);
-    if (outcome.code !== 0 && !stopping.signal.aborted) throw new Error("Next.js 已异常退出。");
-  }
+  const args = ["node_modules/next/dist/bin/next", production ? "start" : "dev",
+    "--hostname", production ? "0.0.0.0" : "127.0.0.1", "--port", appPort];
+  const next = start(process.execPath, args, { env: { ...env, PLAYGROUND_MARKET_SERVICE_URL: backendUrl } });
+  const outcome = await Promise.race([next.done, backendExit]);
+  if (outcome.code !== 0 && !stopping.signal.aborted) throw new Error("Next.js 已异常退出。");
 } catch (error) {
   if (!stopping.signal.aborted) {
     console.error(error instanceof Error ? error.message : error);

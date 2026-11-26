@@ -9,15 +9,27 @@ export const MAX_TURNOVER_MULTIPLE = 100;
 export const TURNOVER_BASELINE_MINUTES = 60;
 export const ALERT_DAY_MS = 24 * 60 * 60 * 1000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+const MAX_U32 = 0xffffffff;
+export const DEFAULT_ALERT_OBSERVATION = { minutes: 15, upPercent: 5, downPercent: 5 };
 
 type Sample = { time: number; price: number };
 type LevelSample = Sample & { sampledAt?: number };
 export type PriceAlertState = { samples: Sample[]; baseline?: Sample };
 export type DirectionalAlertState = { up: PriceAlertState; down: PriceAlertState };
 export type DirectionalThresholds = { up: number | null; down: number | null };
-export type PriceAlertLevel = { level: number; previous: number; target: number; sample: LevelSample; change: number };
-export type PriceAlertSeries = { latest: PriceAlertLevel; volume?: AlertVolume };
-export type LeveledPriceState = PriceAlertState & { series?: PriceAlertSeries };
+export type AlertObservationRule = typeof DEFAULT_ALERT_OBSERVATION;
+export type PriceAlertLevel = {
+  level: number; previous: number; originalReference: number; target: number;
+  threshold: number; sample: LevelSample; change: number; observationMinutes?: number;
+};
+export type PendingPriceAlert = { move: PriceAlertLevel; highestBand: number };
+type PriceAlertSeries = {
+  latest: PriceAlertLevel;
+  highestBand: number;
+  volume: AlertVolume;
+  lastAlertTime: number;
+};
+export type LeveledPriceState = { samples: Sample[]; latest?: Sample; pending?: PendingPriceAlert; series?: PriceAlertSeries };
 export type AlertRatio = { ratio: number; long: number; short: number; time: number };
 export type AlertMarketContext = {
   turnover: number | null;
@@ -26,13 +38,13 @@ export type AlertMarketContext = {
 };
 export type AlertTurnover = { turnover: number | null; baseline: number | null };
 export type AlertVolume = AlertTurnover & { multiple: number | null };
-export const alertForecastLabels = { up: "上涨", down: "下跌" };
-export type AlertForecastDirection = keyof typeof alertForecastLabels;
 export type SpikeRecord = {
   symbol: string;
   time: number;
   price: number;
   previous: number;
+  originalReference?: number;
+  observationMinutes?: number;
   change: number;
   threshold: number;
   seconds: number;
@@ -52,15 +64,20 @@ export function alertDayStart(time: number) {
   return Math.floor((time + BEIJING_OFFSET_MS) / ALERT_DAY_MS) * ALERT_DAY_MS - BEIJING_OFFSET_MS;
 }
 
-export function forecastAlertDirection({ price, change }: Pick<SpikeRecord, "price" | "change">,
-  latestPrice = price): AlertForecastDirection {
-  if (latestPrice !== price) return latestPrice > price ? "up" : "down";
-  return change > 0 ? "up" : "down";
-}
-
 function readAlertNumber(value: string): number | null {
   const number = Number(value);
   return value.trim() && Number.isFinite(number) ? number : null;
+}
+
+export function parseAlertObservation(minutesInput: unknown, upInput: unknown, downInput: unknown): AlertObservationRule | null {
+  const read = (value: unknown) => typeof value === "string" ? readAlertNumber(value) : typeof value === "number" ? value : null;
+  const minutes = read(minutesInput);
+  const upPercent = read(upInput);
+  const downPercent = read(downInput);
+  if (minutes === null || !Number.isInteger(minutes) || minutes < 1 || minutes > MAX_U32 ||
+      upPercent === null || !(upPercent > 0 && upPercent <= 100) ||
+      downPercent === null || !(downPercent > 0 && downPercent <= 100)) return null;
+  return { minutes, upPercent, downPercent };
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -119,9 +136,9 @@ export function restoreAlertSeconds(value: string): number | null {
   return Number.isInteger(seconds) && seconds >= 1 ? Math.min(MAX_ALERT_SECONDS, Math.max(MIN_ALERT_SECONDS, seconds)) : null;
 }
 
-function isNewSample(samples: Sample[], sample: Sample) {
+function isNewSample(sample: Sample, previous?: Sample) {
   return Number.isFinite(sample.price) && sample.price > 0 && Number.isFinite(sample.time) &&
-    sample.time > (samples.at(-1)?.time ?? 0);
+    sample.time > (previous?.time ?? 0);
 }
 
 function pruneSamples(samples: Sample[], cutoff: number) {
@@ -130,7 +147,7 @@ function pruneSamples(samples: Sample[], cutoff: number) {
 
 export function recordPrice(state: PriceAlertState, sample: Sample, threshold: number, seconds = DEFAULT_ALERT_SECONDS) {
   const { samples } = state;
-  if (!isNewSample(samples, sample)) return null;
+  if (!isNewSample(sample, samples.at(-1))) return null;
   const cutoff = sample.time - seconds * 1000;
   pruneSamples(samples, cutoff);
   if (state.baseline && state.baseline.time <= cutoff) state.baseline = undefined;
@@ -160,11 +177,11 @@ export function recordDirectionalPrice(state: DirectionalAlertState, sample: Sam
   });
 }
 
-function crossedLevel(start: number, startLevel: number, sample: LevelSample, threshold: number): PriceAlertLevel | null {
+function firstMove(originalReference: number, sample: LevelSample, threshold: number): PriceAlertLevel | null {
   const factor = 1 + threshold / 100;
-  let level = startLevel;
-  let target = start;
-  let previous = start;
+  let level = 0;
+  let target = originalReference;
+  let previous = originalReference;
   for (;;) {
     const next = target * factor;
     if (!Number.isFinite(next) || next <= 0 || next === target) break;
@@ -174,45 +191,98 @@ function crossedLevel(start: number, startLevel: number, sample: LevelSample, th
     target = next;
     level++;
   }
-  return level === startLevel ? null
-    : { level, previous, target, sample, change: (sample.price - previous) / previous * 100 };
+  return level === 0 ? null
+    : { level, previous, originalReference, target, threshold, sample, change: (sample.price - previous) / previous * 100 };
 }
 
-export function recordPriceLevel(state: LeveledPriceState, sample: LevelSample, threshold: number, seconds: number) {
-  if (!isNewSample(state.samples, sample)) return null;
-  const cutoff = sample.time - seconds * 1000;
-  const series = state.series;
-  if (series && series.latest.sample.time >= cutoff) {
-    const move = crossedLevel(series.latest.target, series.latest.level, sample, threshold);
-    pruneSamples(state.samples, cutoff);
-    if (move) {
-      series.latest = move;
-      state.samples.length = 0;
+function observationStep(threshold: number, rule: AlertObservationRule) {
+  return threshold < 0 ? -rule.downPercent : rule.upPercent;
+}
+
+function reachedBand(reference: number, price: number, logStep: number) {
+  if (!Number.isFinite(logStep) || logStep === 0) return 0;
+  const bands = Math.log(price / reference) / logStep;
+  // Absorb rounding when the price is exactly on a compounded threshold.
+  const tolerance = Math.min(0.000_001, Number.EPSILON * 8 * (Math.abs(bands) + 1 / Math.abs(logStep)));
+  return clamp(Math.floor(bands + tolerance), 0, MAX_U32);
+}
+
+function observationUpgrade(series: PriceAlertSeries, sample: LevelSample, rule: AlertObservationRule): PriceAlertLevel | null {
+  const { originalReference } = series.latest;
+  const threshold = observationStep(series.latest.threshold, rule);
+  const logStep = Math.log1p(threshold / 100);
+  const band = reachedBand(originalReference, sample.price, logStep);
+  if (band <= series.highestBand) return null;
+  const level = Math.min(MAX_U32, series.latest.level + band - series.highestBand);
+  const previous = originalReference * Math.exp(logStep * (band - 1));
+  const target = originalReference * Math.exp(logStep * band);
+  const change = (sample.price - previous) / previous * 100;
+  if (level === series.latest.level || !Number.isFinite(change) || !Number.isFinite(target) || target <= 0) return null;
+  series.highestBand = band;
+  return { level, previous, originalReference, target, threshold, sample, change, observationMinutes: rule.minutes };
+}
+
+function returnedToReference({ originalReference, threshold }: PriceAlertLevel, price: number) {
+  return threshold > 0 ? price <= originalReference : price >= originalReference;
+}
+
+export function recordPriceLevel(state: LeveledPriceState, sample: LevelSample, rules: DirectionalThresholds, seconds: number,
+  observation: AlertObservationRule = DEFAULT_ALERT_OBSERVATION) {
+  const previous = state.latest;
+  if (!isNewSample(sample, previous)) return null;
+  state.latest = sample;
+  if (state.pending) {
+    if (returnedToReference(state.pending.move, sample.price)) {
+      state.pending = undefined;
+      state.samples.push(sample);
     }
+    return null;
+  }
+  const series = state.series;
+  if (series) {
+    const elapsed = (sample.sampledAt ?? sample.time) - series.lastAlertTime;
+    if (!returnedToReference(series.latest, sample.price) && elapsed < observation.minutes * 60_000) {
+      if (elapsed < 0) return null;
+      const move = observationUpgrade(series, sample, observation);
+      if (!move) return null;
+      series.latest = move;
+      series.lastAlertTime = sample.sampledAt ?? sample.time;
+      return { move, needsTurnover: false as const, volume: series.volume };
+    }
+    state.series = undefined;
     state.samples.push(sample);
-    return move && series.volume ? { move, needsTurnover: false as const, volume: series.volume } : null;
+    return null;
   }
 
-  if (series) {
-    state.series = undefined;
-    state.baseline = undefined;
+  pruneSamples(state.samples, sample.time - seconds * 1000);
+  const thresholds = previous && sample.price < previous.price ? [rules.down, rules.up] : [rules.up, rules.down];
+  for (const threshold of thresholds) {
+    if (threshold === null) continue;
+    let reference = sample.price;
+    for (const prior of state.samples) {
+      reference = threshold > 0 ? Math.min(reference, prior.price) : Math.max(reference, prior.price);
+    }
+    const move = firstMove(reference, sample, threshold);
+    if (!move) continue;
+    const logStep = Math.log1p(observationStep(threshold, observation) / 100);
+    const pending = { move, highestBand: reachedBand(reference, sample.price, logStep) };
+    state.samples.length = 0;
+    state.pending = pending;
+    return { move, pending, needsTurnover: true as const };
   }
-  const result = recordPrice(state, sample, threshold, seconds);
-  const move = result?.triggered ? crossedLevel(result.reference.price, 0, sample, threshold) : null;
-  if (!move) return null;
-  const started = { latest: move };
-  state.series = started;
-  return { move, series: started, needsTurnover: true as const };
+  state.samples.push(sample);
+  return null;
 }
 
-export function settlePriceSeries(state: LeveledPriceState, series: PriceAlertSeries, volume: AlertVolume | null) {
-  if (volume) {
-    series.volume = volume;
-    return series.latest;
+export function settlePriceAlert(state: LeveledPriceState, pending: PendingPriceAlert,
+  confirmation: { volume: AlertVolume; confirmedAt: number } | null) {
+  if (state.pending !== pending) return;
+  state.pending = undefined;
+  if (confirmation) {
+    state.series = {
+      latest: pending.move, highestBand: pending.highestBand, volume: confirmation.volume, lastAlertTime: confirmation.confirmedAt,
+    };
+  } else if (state.latest) {
+    state.samples.push(state.latest);
   }
-  if (state.series === series) {
-    state.series = undefined;
-    state.baseline = undefined;
-  }
-  return null;
 }
