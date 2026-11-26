@@ -29,6 +29,7 @@ use crate::now_ms;
 use crate::store::Store;
 use crate::strategy::Rule;
 
+mod add_entry;
 mod exit_orders;
 pub use exit_orders::PositionRequest;
 use exit_orders::{execution_uncertain, LIMIT_EXIT};
@@ -244,6 +245,17 @@ pub struct OrderIntent {
     pub note: String,
 }
 
+pub(crate) struct RoundOrder<'a> {
+    pub round_id: &'a str,
+    pub signal_id: &'a str,
+    pub increase: Option<RoundIncrease<'a>>,
+}
+
+pub(crate) struct RoundIncrease<'a> {
+    pub trade_id: &'a str,
+    pub max_position_notional: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
@@ -260,7 +272,7 @@ impl Execution {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TradeOrder {
-    /// entry | stop-loss | take-profit | exit | limit-exit
+    /// entry | add-entry | stop-loss | take-profit | exit | limit-exit
     pub kind: String,
     pub side: String,
     pub amount: f64,
@@ -281,6 +293,10 @@ pub struct TradeOrder {
 pub struct Trade {
     pub id: String,
     pub strategy: StrategyRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    verify_increase_protection: bool,
     pub mode: Mode,
     pub symbol: String,
     pub unified_symbol: String,
@@ -500,13 +516,13 @@ impl Trader {
     /// Places a trade for a strategy: risk checks, market entry, exchange-side
     /// stop-loss and take-profit. Returns the stored trade.
     pub async fn submit(&self, intent: OrderIntent, account_revision: Uuid) -> TradeResult<Value> {
-        self.submit_guarded(intent, account_revision, |_| Ok(())).await
+        self.submit_guarded(intent, account_revision, None, |_| Ok(())).await
     }
 
     pub async fn auto_account_revision(&self) -> Option<Uuid> {
         let _operation = self.operations.lock().await;
         let mut account = self.account.write().await;
-        // The monitor-only launcher and the web service share the saved account.
+        // Another local instance can update the account saved in the same directory.
         let settings = Settings::load(&self.store.trading_account_path());
         if account.settings != settings {
             *account = Account::new(settings);
@@ -523,8 +539,9 @@ impl Trader {
         self.store.save_rule(rule).map_err(|_| "无法保存后台监控设置。".into())
     }
 
-    pub async fn submit_guarded(
+    pub(crate) async fn submit_guarded(
         &self, intent: OrderIntent, account_revision: Uuid,
+        round: Option<RoundOrder<'_>>,
         guard: impl Fn(bool) -> TradeResult<()>,
     ) -> TradeResult<Value> {
         let _operation = self.operations.lock().await;
@@ -541,6 +558,9 @@ impl Trader {
                 .unwrap_or_else(|| "交易未开启，请在「账号设置」中连接币安。".into()));
         };
         Self::check_intent(settings, &intent)?;
+        if let Some((round, increase)) = round.as_ref().and_then(|round| round.increase.as_ref().map(|increase| (round, increase))) {
+            return self.increase_round_trade(&account, exchange, &intent, round, increase, &guard).await;
+        }
         let matches_account = |trade: &Value| trade["mode"] == json!(settings.mode)
             && account.matches_key(trade["accountFingerprint"].as_str());
         let check_risk = |rows: &[Value]| -> TradeResult<()> {
@@ -602,6 +622,8 @@ impl Trader {
                 id: intent.strategy_id.clone(),
                 name: intent.strategy_name.clone(),
             },
+            round_id: round.as_ref().map(|round| round.round_id.to_owned()),
+            verify_increase_protection: false,
             mode: settings.mode,
             symbol: intent.symbol.clone(),
             unified_symbol: unified.clone(),
@@ -803,6 +825,7 @@ impl Trader {
             return Err("开仓结果正在自动核对，确认后会自动管理仓位。".into());
         }
         let mut core = exchange.lock().await;
+        self.reconcile_round_increase(&mut core, &mut trade).await?;
         self.close_locked(&mut core, &mut trade, "手动平仓").await;
         drop(core);
         self.invalidate_balance().await;
@@ -838,6 +861,9 @@ impl Trader {
                 continue;
             }
             let mut core = exchange.lock().await;
+            if self.reconcile_round_increase(&mut core, &mut trade).await.is_err() {
+                continue;
+            }
             let Ok(position) = trade_position(&mut core, &trade).await else {
                 continue;
             };
@@ -858,7 +884,8 @@ impl Trader {
                 }
                 self.finish_exchange_exit(&mut core, &mut trade).await;
             } else if trade.status == "closing" || now_ms() >= trade.deadline {
-                self.close_locked(&mut core, &mut trade, "持仓到期，市价平仓").await;
+                let reason = trade.exit_reason.clone().unwrap_or_else(|| "持仓到期，市价平仓".into());
+                self.close_locked(&mut core, &mut trade, &reason).await;
             } else {
                 self.refresh_pending_exits(&mut core, &mut trade).await;
                 let triggered = trade.orders.iter().rev().find_map(|order| {
@@ -1523,6 +1550,8 @@ mod tests {
         let trade = Trade {
             id: "test-BTCUSDT-1".into(),
             strategy: StrategyRef { id: "test".into(), name: "测试策略".into() },
+            round_id: None,
+            verify_increase_protection: false,
             mode: Mode::Demo,
             symbol: "BTCUSDT".into(),
             unified_symbol: "BTC/USDT:USDT".into(),

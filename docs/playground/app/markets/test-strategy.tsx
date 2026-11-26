@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { tradingModeLabels, type TestOrderRequest, type TradingStatus } from "@/lib/trading-types";
+import { useRememberedDetails } from "./use-remembered-details";
 import styles from "./markets.module.css";
 
 type Props = {
@@ -15,6 +16,7 @@ const formatBalance = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 
 const defaults = { symbol: "DOGEUSDT", direction: "long", notional: "20", leverage: "2", stopLoss: "1", takeProfit: "1", hold: "5" };
 
 export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
+  const details = useRememberedDetails("test-strategy");
   const [form, setForm] = useState(defaults);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -62,7 +64,7 @@ export default function TestStrategy({ mode, status, error, onSubmit }: Props) {
 
   const balance = status?.balance;
   return (
-    <details className={styles.monitorFeature}>
+    <details className={styles.monitorFeature} {...details}>
       <summary className={styles.monitorSummary}>
         <h3>测试策略 <small>{mode === "loading" ? "正在读取下单状态"
           : mode === "unavailable" ? "仅本地模式可用"

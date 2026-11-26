@@ -288,18 +288,6 @@ pub fn format_event(event: &Value) -> Option<Message> {
                 .filter(|change| *change != 0.0 && change.signum() == threshold.signum())?;
             let date = DateTime::from_timestamp_millis(time)?
                 .with_timezone(&FixedOffset::east_opt(28_800)?);
-            let direction = match event["forecastDirection"].as_str() {
-                Some("up") => "上涨",
-                Some("down") => "下跌",
-                None if event["forecastDirection"].is_null() => {
-                    if change > 0.0 {
-                        "上涨"
-                    } else {
-                        "下跌"
-                    }
-                }
-                _ => return None,
-            };
             let percent = |value| {
                 format!(
                     "{}{}",
@@ -307,15 +295,28 @@ pub fn format_event(event: &Value) -> Option<Message> {
                     decimal(value, 4)
                 )
             };
+            let observation = event["observationMinutes"]
+                .as_u64()
+                .filter(|minutes| *minutes > 0);
+            let (window, reference_label) = match observation {
+                Some(minutes) => (format!("观察期 {minutes} 分钟"), "本档参考价"),
+                None => (format!("{seconds} 秒窗口"), "参考价"),
+            };
             let mut lines = vec![
                 format!("{}（北京时间）", date.format("%Y/%-m/%-d %H:%M:%S")),
                 format!(
-                    "{seconds} 秒窗口 · 涨跌 {}% · 阈值 {}%",
+                    "{window} · 涨跌 {}% · 阈值 {}%",
                     percent(change),
                     percent(threshold)
                 ),
-                format!("参考价 {previous} → 触发价 {price} USDT"),
+                format!("{reference_label} {previous} → 触发价 {price} USDT"),
             ];
+            if let Some(original) = event["originalReference"]
+                .as_f64()
+                .filter(|price| observation.is_some() && *price > 0.0)
+            {
+                lines.push(format!("原始参考价 {original} USDT"));
+            }
             let multiple = event["volume"]["multiple"]
                 .as_f64()
                 .or(event["multiple"].as_f64());
@@ -334,7 +335,6 @@ pub fn format_event(event: &Value) -> Option<Message> {
                 }
                 lines.push(label);
             }
-            lines.push(format!("涨跌预测：{direction}"));
             Some(Message {
                 title: format!("【{MARKET_SPIKE_NAME}】{symbol} {level} 级告警"),
                 lines,
@@ -358,15 +358,26 @@ mod tests {
 
     #[test]
     fn uses_the_strategy_name_for_alerts_and_a_plain_title_for_test_messages() {
-        let alert = format_event(&json!({
+        let event = json!({
             "kind": "market-spike", "symbol": "BTCUSDT", "time": 1_700_000_000_000_i64,
             "level": 2, "seconds": 30, "previous": 100, "price": 95, "change": -5, "threshold": -5,
-        }))
-        .unwrap();
-        assert_eq!(
-            alert.text().lines().next(),
-            Some("【异动监控策略】BTCUSDT 2 级告警")
-        );
+            "volume": {"multiple": 3.25, "baseline": 120_000, "turnover": 390_000},
+        });
+        let expected = "【异动监控策略】BTCUSDT 2 级告警\n2023/11/15 06:13:20（北京时间）\n30 秒窗口 · 涨跌 -5% · 阈值 -5%\n参考价 100 → 触发价 95 USDT\n成交额3.25倍(12万 -> 39万)";
+        assert_eq!(format_event(&event).unwrap().text(), expected);
+
+        let mut saved_event = event;
+        saved_event["forecastDirection"] = json!("up");
+        assert_eq!(format_event(&saved_event).unwrap().text(), expected);
+
+        saved_event["observationMinutes"] = json!(15);
+        saved_event["previous"] = json!(95.0);
+        saved_event["price"] = json!(90.25);
+        saved_event["originalReference"] = json!(100.0);
+        let upgrade = format_event(&saved_event).unwrap().text();
+        assert!(upgrade.contains("观察期 15 分钟 · 涨跌 -5% · 阈值 -5%"));
+        assert!(upgrade.contains("本档参考价 95 → 触发价 90.25 USDT"));
+        assert!(upgrade.contains("原始参考价 100 USDT"));
 
         let test = format_event(&json!({"kind": "test"})).unwrap();
         assert_eq!(test.text(), "钉钉推送测试\n交易策略通知已连通。");

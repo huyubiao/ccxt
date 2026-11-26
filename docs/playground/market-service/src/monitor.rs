@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
@@ -17,10 +17,10 @@ use uuid::Uuid;
 use crate::binance::{number, outbound_proxy, Binance, Contract, VOLUME_DELAY_MS};
 use crate::notifications::{format_event, Notifier};
 use crate::now_ms;
-use crate::spike_trade::{Evaluation, Evaluator};
+use crate::spike_trade::{observe_breakout, BreakoutObservation, Evaluation, Evaluator};
 use crate::store::{Delivery, Result, Store};
 use crate::strategy::{
-    Detection, Move, PendingCheck, PriceWindow, Rule, Sample, Volume, MARKET_SPIKE_NAME,
+    Detection, Move, PriceWindow, Rule, Sample, Volume, MARKET_SPIKE_NAME,
 };
 use crate::trading::Side;
 
@@ -28,37 +28,19 @@ const CHECK_LIMIT: usize = 100;
 const CHECK_CONCURRENCY: usize = 2;
 const MAX_QUEUE_AGE: i64 = 15_000;
 const MAX_EVALUATIONS: usize = 16;
+const MAX_BREAKOUT_OBSERVATIONS: usize = 4;
 const MAX_WATCHES: usize = 20;
 const WATCH_DURATION: i64 = 3_600_000;
-type SharedWindow = Arc<Mutex<PriceWindow>>;
+type ObservationTask = (String, BreakoutObservation, Option<oneshot::Sender<BreakoutObservation>>);
 
 enum Feed {
     Tickers(Vec<(String, Sample)>),
     Disconnected,
 }
 
-struct SymbolState {
-    last_tick: i64,
-    up: SharedWindow,
-    down: SharedWindow,
-}
-
-impl SymbolState {
-    fn new() -> Self {
-        Self {
-            last_tick: 0,
-            up: Arc::default(),
-            down: Arc::default(),
-        }
-    }
-}
-
 struct Check {
     contract: Contract,
-    window: SharedWindow,
-    pending: PendingCheck,
     first: Move,
-    threshold: f64,
 }
 
 struct Watch {
@@ -83,7 +65,7 @@ struct Monitor {
     owner: String,
     rule: Rule,
     version: i64,
-    windows: HashMap<String, SymbolState>,
+    windows: HashMap<String, PriceWindow>,
     pending: VecDeque<Check>,
     checks: JoinSet<(Check, Volume)>,
     watches: HashMap<String, Watch>,
@@ -91,6 +73,8 @@ struct Monitor {
     context_queue: VecDeque<(String, String, i64)>,
     evaluator: Arc<Evaluator>,
     evaluations: JoinSet<Result<()>>,
+    observation_binance: Arc<Binance>,
+    observations: JoinSet<ObservationTask>,
 }
 
 pub async fn supervise(
@@ -116,6 +100,8 @@ pub async fn supervise(
             context_queue: VecDeque::new(),
             evaluator: Arc::clone(&evaluator),
             evaluations: JoinSet::new(),
+            observation_binance: Arc::new(Binance::new()),
+            observations: JoinSet::new(),
         };
         if let Err(error) = monitor.run(&mut stop).await {
             eprintln!("Market monitor stopped: {error}");
@@ -140,9 +126,11 @@ impl Monitor {
             self.store.reset_watches(&self.owner)?;
             self.store.interrupt_spikes(&self.owner)?;
             self.store.interrupt_spike_evaluations(&self.owner, true)?;
+            self.store.interrupt_breakout_observations(&self.owner)?;
             self.event_loop(stop).await
         }
         .await;
+        self.observations.shutdown().await;
         let interrupted = self.store.interrupt_spike_evaluations(&self.owner, false);
         while let Some(job) = self.evaluations.join_next().await {
             report_evaluation(job);
@@ -150,6 +138,7 @@ impl Monitor {
         let cleanup = (|| {
             self.store.interrupt_spikes(&self.owner)?;
             self.store.interrupt_spike_evaluations(&self.owner, true)?;
+            self.store.interrupt_breakout_observations(&self.owner)?;
             self.store.reset_watches(&self.owner)?;
             self.store.release(&self.owner)
         })();
@@ -180,7 +169,7 @@ impl Monitor {
                     if self.rule != rule || self.version != version {
                         if let Some(active) = feed.take() { active.abort(); }
                         generation += 1;
-                        self.clear_window().await?;
+                        self.clear_window(false).await?;
                         connected = false;
                         if self.version != version || !rule.enabled { self.watches.clear(); }
                         self.rule = rule;
@@ -232,7 +221,7 @@ impl Monitor {
                             }
                         }
                     }
-                    Some((_, Feed::Disconnected)) => { connected = false; self.clear_window().await?; }
+                    Some((_, Feed::Disconnected)) => { connected = false; self.clear_window(true).await?; }
                     None => break,
                 },
                 next = feeds.join_next_with_id(), if !feeds.is_empty() => {
@@ -254,6 +243,12 @@ impl Monitor {
                 task = self.evaluations.join_next(), if !self.evaluations.is_empty() => {
                     if let Some(job) = task { report_evaluation(job); }
                 }
+                task = self.observations.join_next(), if !self.observations.is_empty() => {
+                    if let Some(Ok((id, observation, scoring))) = task {
+                        self.store.finish_breakout_observation(&id, &self.owner, &json!(observation))?;
+                        if let Some(scoring) = scoring { let _ = scoring.send(observation); }
+                    }
+                }
                 delivery = deliveries.join_next(), if !deliveries.is_empty() => {
                     if let Some(Ok((job, status))) = delivery { self.store.finish_delivery(&job, status, now_ms())?; }
                 }
@@ -273,66 +268,35 @@ impl Monitor {
         Ok(())
     }
 
-    async fn clear_window(&mut self) -> Result<()> {
+    async fn clear_window(&mut self, keep_series: bool) -> Result<()> {
         self.checks.shutdown().await;
         self.pending.clear();
-        self.windows.clear();
+        self.windows.retain(|_, window| keep_series && window.has_confirmed_series());
         self.store.interrupt_spikes(&self.owner)
     }
 
     fn observe(&mut self, contract: &Contract, sample: Sample) -> Result<()> {
-        let state = self
+        let observation = self
             .windows
             .entry(contract.id.clone())
-            .or_insert_with(SymbolState::new);
-        if sample.time <= state.last_tick {
-            return Ok(());
-        }
-        if sample.time - state.last_tick > i64::from(self.rule.seconds) * 1_000 {
-            *state = SymbolState::new();
-        }
-        state.last_tick = sample.time;
-        let directions = [
-            (self.rule.up, Arc::clone(&state.up)),
-            (self.rule.down, Arc::clone(&state.down)),
-        ];
-        for (threshold, window) in directions {
-            let Some(threshold) = threshold else {
-                continue;
-            };
-            let observation = window.lock().expect("price window lock poisoned").observe(
-                sample,
-                threshold,
-                self.rule.seconds,
-            );
-            match observation {
-                Some(Detection::CheckTurnover(first, pending)) => {
-                    let check = Check {
-                        contract: contract.clone(),
-                        window,
-                        pending,
-                        first,
-                        threshold,
-                    };
-                    if self.pending.len() >= CHECK_LIMIT {
-                        self.settle(check, None, "skipped")?;
-                    } else {
-                        self.log_spike(
-                            &contract.id,
-                            first,
-                            threshold,
-                            "pending",
-                            Some(self.rule.turnover_multiple),
-                            None,
-                        )?;
-                        self.pending.push_back(check);
-                    }
+            .or_default()
+            .observe(sample, self.rule);
+        match observation {
+            Some(Detection::CheckTurnover(first)) => {
+                let check = Check { contract: contract.clone(), first };
+                if self.pending.len() >= CHECK_LIMIT {
+                    self.settle(check, None, "skipped")?;
+                } else {
+                    self.log_spike(
+                        &contract.id, first, "pending", Some(self.rule.turnover_multiple), None,
+                    )?;
+                    self.pending.push_back(check);
                 }
-                Some(Detection::Confirmed(next, volume)) => {
-                    self.confirm(contract, next, threshold, volume, Some(sample), None, None)?
-                }
-                None => {}
             }
+            Some(Detection::Confirmed(next, volume)) => {
+                self.confirm(contract, next, volume, None, None)?;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -342,7 +306,9 @@ impl Monitor {
             let Some(check) = self.pending.pop_front() else {
                 break;
             };
-            if now_ms() - check.first.sample.time > MAX_QUEUE_AGE {
+            let current = self.windows.get(&check.contract.id)
+                .is_some_and(|window| window.has_pending_series(check.first.sample.time));
+            if !current || now_ms() - check.first.sample.time > MAX_QUEUE_AGE {
                 self.settle(check, None, "unavailable")?;
                 continue;
             }
@@ -372,66 +338,52 @@ impl Monitor {
         let passed = volume.filter(|_| {
             timely && multiple.is_some_and(|multiple| multiple >= self.rule.turnover_multiple)
         });
-        let mut window = check.window.lock().expect("price window lock poisoned");
-        let movement = window.settle(check.pending, passed);
-        let latest = window.latest();
-        drop(window);
         let symbol = &check.contract.id;
+        let first_time = check.first.sample.time;
+        let current = self.windows.get(symbol).is_some_and(|window| window.has_pending_series(first_time));
         let required = Some(self.rule.turnover_multiple);
-        if let Some((movement, confirmed_volume)) = movement.zip(passed) {
-            let upgraded = movement.level != check.first.level;
-            if upgraded {
-                self.log_spike(
-                    symbol,
-                    check.first,
-                    check.threshold,
-                    "upgraded",
-                    required,
-                    volume,
-                )?;
-            }
-            self.confirm(
-                &check.contract,
-                movement,
-                check.threshold,
-                confirmed_volume,
-                latest,
-                if upgraded { None } else { required },
-                Some(check.first.sample.time),
-            )?;
+        let confirmation = if let Some(confirmed_volume) = passed.filter(|_| current) {
+            self.confirm(&check.contract, check.first, confirmed_volume, required, Some(first_time))?
+                .map(|confirmed_at| (confirmed_volume, confirmed_at))
         } else {
-            let status = if timely && multiple.is_some() {
+            None
+        };
+        if let Some(window) = self.windows.get_mut(symbol) {
+            window.settle(first_time, self.rule.observation, confirmation);
+        }
+        if confirmation.is_none() {
+            let status = if !current || passed.is_some() {
+                "interrupted"
+            } else if timely && multiple.is_some() {
                 "below-threshold"
             } else {
                 unavailable_status
             };
-            self.log_spike(
-                symbol,
-                check.first,
-                check.threshold,
-                status,
-                required,
-                volume,
-            )?;
+            self.log_spike(symbol, check.first, status, required, volume)?;
         }
         Ok(())
     }
 
-    fn event(&self, symbol: &str, movement: Move, threshold: f64) -> Value {
-        json!({"symbol":symbol,"time":movement.sample.time,"level":movement.level,"seconds":self.rule.seconds,
-            "previous":movement.previous,"price":movement.sample.price,"change":movement.change,"threshold":threshold})
+    fn event(&self, symbol: &str, movement: Move) -> Value {
+        let mut event = json!({"symbol":symbol,"time":movement.sample.time,"level":movement.level,"seconds":self.rule.seconds,
+            "previous":movement.previous,"originalReference":movement.original_reference,
+            "price":movement.sample.price,"change":movement.change,"threshold":movement.threshold,
+            "roundId":round_id(symbol, movement)});
+        if let Some(minutes) = movement.observation_minutes {
+            event["observationMinutes"] = json!(minutes);
+        }
+        event
     }
 
     fn log_spike(
         &self,
         symbol: &str,
         movement: Move,
-        threshold: f64,
         status: &str,
         required: Option<f64>,
         volume: Option<Volume>,
     ) -> Result<()> {
-        let mut spike = self.event(symbol, movement, threshold);
+        let mut spike = self.event(symbol, movement);
         spike["status"] = json!(status);
         spike["requiredMultiple"] = json!(required);
         if let Some(volume) = volume {
@@ -444,47 +396,63 @@ impl Monitor {
         &mut self,
         contract: &Contract,
         movement: Move,
-        threshold: f64,
         volume: Volume,
-        latest: Option<Sample>,
         required: Option<f64>,
         series_trigger_time: Option<i64>,
-    ) -> Result<()> {
+    ) -> Result<Option<i64>> {
         let symbol = &contract.id;
-        let mut event = self.event(symbol, movement, threshold);
+        let mut event = self.event(symbol, movement);
+        let threshold = movement.threshold;
         let time = movement.sample.time;
         let id = format!(
             "market-spike:{symbol}:{time}:{}:{threshold}:{}",
             self.rule.seconds, movement.level
         );
         event["kind"] = json!("market-spike");
-        event["forecastDirection"] = json!(movement.forecast(latest));
         event["volume"] = json!(volume);
-        let evaluate = series_trigger_time.zip(volume.multiple);
+        let evaluate = series_trigger_time.filter(|_| volume.multiple.is_some());
         let can_queue = self.evaluations.len() < MAX_EVALUATIONS;
+        let can_observe = self.observations.len() < MAX_BREAKOUT_OBSERVATIONS;
         if evaluate.is_some() {
             event["continuation"] = json!({"status":if can_queue { "pending" } else { "queue-skipped" }});
+            event["breakoutObservation"] = json!(if can_observe {
+                BreakoutObservation::Pending
+            } else {
+                BreakoutObservation::QueueSkipped
+            });
         }
+        let confirmed_at = now_ms();
         if self
             .store
-            .confirm(&id, &event, self.rule, &self.owner, self.version, now_ms())?
+            .confirm(&id, &event, self.rule, &self.owner, self.version, confirmed_at)?
         {
             self.log_spike(
                 symbol,
                 movement,
-                threshold,
                 "alerted",
                 required,
                 Some(volume),
             )?;
-            if let Some((trigger_time, turnover)) = evaluate.filter(|_| can_queue) {
+            let (scoring, observation) = (evaluate.is_some() && can_queue && can_observe)
+                .then(oneshot::channel)
+                .unzip();
+            if let Some(trigger_time) = evaluate.filter(|_| can_queue) {
                 let evaluator = Arc::clone(&self.evaluator);
                 let evaluation = Evaluation {
-                    id: id.clone(), contract: contract.clone(), trigger_time, turnover,
+                    id: id.clone(), round_id: round_id(symbol, movement), contract: contract.clone(), trigger_time, volume, observation,
                     side: if threshold > 0.0 { Side::Long } else { Side::Short },
                     rule: self.rule, owner: self.owner.clone(),
                 };
                 self.evaluations.spawn(async move { evaluator.evaluate(evaluation).await });
+            }
+            if evaluate.is_some() && can_observe {
+                let binance = Arc::clone(&self.observation_binance);
+                let alert_id = id.clone();
+                let symbol = symbol.to_owned();
+                self.observations.spawn(async move {
+                    let observed = observe_breakout(&binance, &symbol, movement, threshold > 0.0).await;
+                    (alert_id, observed, scoring)
+                });
             }
             self.start_watch(symbol, time)?;
             self.store.finish_signal(&id, &self.owner)?;
@@ -493,8 +461,9 @@ impl Monitor {
             } else {
                 self.store.save_context(&id, &json!("queue-skipped"))?;
             }
+            return Ok(Some(confirmed_at));
         }
-        Ok(())
+        Ok(None)
     }
 
     fn start_watch(&mut self, symbol: &str, time: i64) -> Result<()> {
@@ -502,7 +471,8 @@ impl Monitor {
         let after = self
             .windows
             .get(symbol)
-            .map_or(time, |state| state.last_tick);
+            .and_then(PriceWindow::latest)
+            .map_or(time, |sample| sample.time);
         let watch = Watch {
             signal_time: time,
             expires: now + WATCH_DURATION,
@@ -578,6 +548,10 @@ impl Monitor {
         }
         Ok(())
     }
+}
+
+fn round_id(symbol: &str, movement: Move) -> String {
+    format!("{symbol}:{}:{}", movement.threshold.signum(), movement.first_trigger_time)
 }
 
 fn report_evaluation(job: std::result::Result<Result<()>, tokio::task::JoinError>) {

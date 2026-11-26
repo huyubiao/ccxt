@@ -418,14 +418,16 @@ by the mean of up to 180 preceding full trading days. The server caches a valid
 multiple until the next UTC day.
 
 Use the price monitor embedded in the market page to watch all listed Binance
-USDT perpetual contracts. **异动监控策略** and **告警记录** start collapsed on
-each page load. Monitoring starts off by default.
+USDT perpetual contracts. **账号设置**, **异动监控策略**, **告警记录**,
+**测试策略**, and **下单记录** start collapsed and each remembers its last
+expanded or collapsed state in the same browser. Monitoring starts off by default.
 Confirm the prompt after switching the strategy on or off. Turning it off
 closes the price stream and cancels pending checks.
-In local mode, turn on **异动监控策略 → 启用策略** to activate the Rust monitor.
-It keeps monitoring after the browser closes, for as long as the launcher
-is running. To run the saved rule independently of the web app, use
-`start-playground.cmd monitor` or `npm run monitor`. On the public
+On Windows, run `start-playground.cmd` and open the local market page. Use
+**异动监控策略 → 启用策略** to start or stop monitoring. The Rust backend
+saves that choice and monitors with the same rule after the webpage or browser
+closes, as long as the launcher is running. When you reopen the page, it shows
+the saved state. A later launch also reads the saved rule. On the public
 Playground, keep the market page open for browser-based monitoring.
 Set the window in whole seconds (10 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
@@ -433,17 +435,28 @@ New rules start with both directions selected at 5%.
 Both thresholds range from 2% through 100%, inclusive. Previously saved
 thresholds and windows outside their bounds are adjusted when the settings
 are read.
-Each direction maintains its own rolling samples and alert levels.
-Changing the price thresholds or window restarts sampling. Existing signed
-threshold settings migrate to the corresponding direction.
+The short window is used to detect the first trigger. An upward trigger compares
+with the lowest price in that window, and a downward trigger with the highest.
+If both directions qualify on a sample, the monitor considers the direction of
+the latest price change first. Existing signed thresholds keep their direction.
 The local monitor uses the exchange's event timestamps. In browser mode, the
 monitor samples the latest received price once per second. A rule triggers
 when its signed percentage threshold is reached or exceeded.
-Levels compound from the threshold price rather than the traded price.
-For example, a 5% upward rule starting at 100 has levels at 105, 110.25,
-and 115.7625. A sample can reach several levels and reports the highest one.
-Each level reached starts a fresh window for the next level. If the window
-expires, the monitor returns to looking for the start of a new series.
+The first price trigger fixes the original reference price and direction for
+that symbol. The observation period starts when the first alert is confirmed.
+The observation duration is
+configurable in whole minutes and defaults to 15. The separate upward and
+downward observation steps both default to 5%. Levels compound from the
+original reference using the step for the first trigger's direction. With a
+reference of 100 and both initial and observation thresholds set to 5%, the
+upward levels are 105, 110.25, and 115.7625. Bands already crossed at the first
+trigger count as reached. A sample can cross multiple new bands and reports the
+highest one. Each upgrade restarts the full observation period from the price
+triggering it. For a 15-minute period, a first alert confirmed at 10:00 and an upgrade
+at 10:10 move the deadline to 10:25.
+An upward series ends when price reaches or drops below the original reference,
+and a downward series ends when it reaches or rises above it. On return or
+expiry, the current sample starts a new short window for both directions.
 
 Price triggers appear in **告警记录**. The first trigger in each series
 enters the turnover check queue. The configured window's Binance USDT
@@ -452,8 +465,12 @@ before any alert in that series is issued. Later levels share that check.
 Previously saved multiples outside this range are adjusted when read.
 The form sets out-of-range numeric thresholds and turnover multiples to the
 nearest limit when leaving the field or saving the settings.
-If the price advances while the check is pending, the highest level reached
-is reported when the check passes. The baseline
+The first alert reports the level of its initial price trigger. The monitor
+checks for upgrades using quotes from the observation period. A failed or
+interrupted turnover check returns the symbol to short-window monitoring.
+A retracement on the same side of the reference keeps
+the round open, even when it would qualify as a short-window trigger in the
+opposite direction. The baseline
 is the median quote turnover of 60 complete one-minute candles before the
 window starts, scaled to its duration. The page shows the latest 100 price
 triggers and their check results, including queued, unsuccessful, and
@@ -464,14 +481,6 @@ fill the available slots. Browser mode keeps up to 100 triggers locally.
 The daily change compares the trigger price with the
 opening price of that Beijing calendar day. Confirmed alerts can also be
 sent to a DingTalk group robot.
-
-Before confirming an alert, the monitor forecasts **上涨** or **下跌** from
-the move between the trigger price and the latest monitored sample.
-If that price is unchanged or a newer sample is unavailable, it uses
-the alert's own direction. The forecast appears in the DingTalk message.
-The local monitor saves it with the alert even
-when the page is closed. Older alerts without a saved forecast use
-the direction recorded at the trigger.
 
 Both **告警记录** and the DingTalk message show the turnover multiple and
 the baseline-to-window turnover in units of 10,000 USDT, for example
@@ -496,18 +505,17 @@ Templates, delivery, and Webhook signing are implemented in the Rust service.
 The browser submits typed events using `lib/strategy-notification-events.ts`.
 
 The local monitor stores its rule, price triggers, alerts and latest DingTalk
-delivery attempts in `.cache/market-monitor/monitor.sqlite`. Both processes
-use the same `PLAYGROUND_MONITOR_DB` override if set. An existing local
+delivery attempts in `.cache/market-monitor/monitor.sqlite`. Set
+`PLAYGROUND_MONITOR_DB` to use another database file. An existing local
 monitor rule takes precedence. The first local rule can reuse thresholds
 and notification preferences previously saved by that browser.
-The monitor starts a new price window after reconnecting, re-enabling, or
-changing the rule.
+Reconnects retain confirmed series and rebuild short windows for new triggers.
+Re-enabling the monitor or changing its price or turnover settings starts fresh.
 Alerts include the level and Binance's latest available five-minute
 all-account long/short ratio and top-trader position ratio at the trigger time.
 
 Failed or rate-limited deliveries retry at most twice. The worker retains 30 days
-of history on disk. With Node.js 24, `node --run monitor` from
-`docs/playground` also starts the worker in the foreground for diagnostics.
+of history on disk.
 
 ### 下单执行与测试策略
 
@@ -524,23 +532,32 @@ USDT 金额或交易所最小下单量、杠杆、止损 %、止盈 %、可选�
    - 保护单已触发且只成交了一部分时，撤销限价平仓单并市价平掉剩余仓位。
    - 持仓到期时，撤销未完成的限价单，再对剩余仓位市价平仓。
 
-本地异动监控在每轮首次确认告警时评估一次延续方向。告警成交额最低倍数由原有告警设置控制，
-评分基准倍数在 **自动下单** 单独设置：
+本地异动监控每轮首次确认告警后评估开仓，使用该条告警触发后 5 秒的聚合成交。四项总分为 100 分。
 
-- **涨跌幅度 60 分**。在异动窗口开始前，取最近 X 小时的完整 K 线。按 `(最高价 − 最低价) / 最低价` 计算区间振幅。
-  振幅不超过 Y% 得 60 分。X 默认为 24，最少 1 小时。Y 默认为 5%，范围为 0% 到 50%。历史不完整时跳过下单。
-- **告警成交额 30 分**。默认以 5 倍为计分基准。达到基准的 1、2、3 倍分别得 10、20、30 分。
-- **强平估算 10 分**。复用币种深度调研的多空强平风险图，按各侧预估强平金额判断主导方向。
-  上涨时要求多头占优，下跌时要求空头占优，同时标记价 5% 以内的预估金额至少占该方向的 20%。模型不可用时计 0 分。
+- **突破站稳 35 分**。上涨看门槛上方，下跌看门槛下方，等于门槛也算守住。全程守住得 35 分，
+  中途退回但最后一笔成交回到突破侧得 20 分，最后一笔退回另一侧得 0 分并跳过下单。
+- **同向主动成交 35 分**。以 USDT 成交金额计算占比。上涨取主动买入占比，下跌取主动卖出占比。
+  同向占比四舍五入到两位小数，达到 55%、60%、65%、70% 分别得 10、20、30、35 分，低于 55% 得 0 分。
+- **告警成交额 20 分**。评分基准默认 5 倍，在 **自动下单** 单独设置。达到基准的 1、2、3 倍分别得 5、10、15 分。
+  原告警窗口的绝对成交额达到 1 万、10 万 USDT 分别额外得 3、5 分，取最高一档。
+- **异动前历史振幅 10 分**。在异动窗口开始前取最近 X 小时的完整 K 线。
+  按 `(最高价 − 最低价) ÷ 最低价 × 100%` 计算。振幅不超过基准得 10 分，超过基准但在基准两倍以内得 5 分，
+  超过两倍或历史数据不足得 0 分。X 默认为 24 小时，评分基准默认为 5%。
 
 连接币安账号并开启 **自动下单** 后，总分至少 80 分的告警可触发 1 倍杠杆市价开仓，上涨做多、下跌做空。
 市价数量按账户所在交易环境的最低名义金额、最小数量、数量步长及标记价计算，仍受单笔金额和持仓上限约束。
-在 **自动下单** 可设置新开仓的止损和止盈百分比，默认各 1%。成交后以实际开仓均价为基准，
-在止盈距离的 75% 处自动挂限价平多或平空，默认距离为 0.75%。止盈条件单留在更远的盈利方向，
+在 **自动下单** 可设置新开仓的止损和止盈百分比，默认各 1%。清空输入框后，离开输入框或保存时会恢复该项默认值。
+成交后以实际开仓均价为基准，在止盈距离的 75% 处自动挂限价平多或平空，默认距离为 0.75%。止盈条件单留在更远的盈利方向，
 价格按币安合约的步长校准。挂单和保护单由后台自动处理，最长持仓 5 分钟。
 自动下单默认关闭。登录或登出后需要重新开启。
-从该轮初次触发起超过 45 秒的信号不再开仓。同一轮后续升级沿用首次核验的成交额，只记录告警。
-**告警记录** 展示评分明细、方向及下单状态。**下单记录** 展示测试策略和异动监控策略的交易。
+5 秒窗口无成交或观察数据不可用时跳过下单。从该轮初次触发起超过 45 秒的信号不再开仓。
+同一轮后续升级沿用首次核验的成交额。开仓评分使用首次确认告警，后续补仓需要独立的下单信号。展开 **告警记录 → 延续评分与下单** 可查看买卖占比、
+突破状态、评分和下单结果。强平估算可在 **币种深度调研** 查看。**下单记录** 展示测试策略和异动监控策略的交易。
+
+执行层按异动轮次、下单信号和目标交易处理补仓。策略提供累计持仓上限，每笔补仓仍受单笔金额上限约束。
+成交存入原交易，订单详情显示 **补仓**。交易继续沿用原止损、止盈和到期时间，原限价平仓单的数量继续按该挂单执行。
+当前自动策略发出首次开仓信号，补仓的信号条件待定义。
+
 当前账户进行中的交易可使用 **市价平仓** 按钮。
 持仓中的交易可打开 **管理持仓**，输入限价提交 **限价平多** 或 **限价平空**，数量取币安当前的剩余策略仓位。
 同笔持仓可有一张限价平仓单，页面显示部分成交数量，并可撤销剩余挂单。

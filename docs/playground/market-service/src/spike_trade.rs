@@ -3,28 +3,108 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{oneshot, watch, Semaphore};
 
-use crate::binance::{number, Binance, Contract, Endpoint};
-use crate::liquidation::Loader;
+use crate::binance::{number, Binance, Contract, Endpoint, TradeWindow, VOLUME_DELAY_MS};
 use crate::now_ms;
 use crate::store::{Result, Store};
-use crate::strategy::{ContinuationRule, Rule, MARKET_SPIKE_ID, MARKET_SPIKE_NAME};
-use crate::trading::{OrderIntent, OrderSize, Side, Trader};
+use crate::strategy::{ContinuationRule, Move, Rule, Volume, MARKET_SPIKE_ID, MARKET_SPIKE_NAME};
+use crate::trading::{OrderIntent, OrderSize, RoundOrder, Side, Trader};
 
 const MINUTE_MS: i64 = 60_000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 const MAX_ALERT_AGE_MS: i64 = 45_000;
 const ORDER_SCORE: u8 = 80;
-const NEAR_PERCENT: f64 = 5.0;
-const MIN_NEAR_SHARE: f64 = 0.2;
+const BREAKOUT_WINDOW_MS: i64 = 5_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum BreakoutPosition {
+    Held,
+    Recovered,
+    Lost,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub(crate) enum BreakoutObservation {
+    Pending,
+    QueueSkipped,
+    NoTrades,
+    Unavailable,
+    Ready {
+        window_seconds: i64,
+        buy_usdt: f64,
+        sell_usdt: f64,
+        net_percent: f64,
+        position: BreakoutPosition,
+        target_price: f64,
+        last_price: f64,
+        last_trade_time: i64,
+    },
+}
+
+pub(crate) async fn observe_breakout(
+    binance: &Binance,
+    symbol: &str,
+    movement: Move,
+    upward: bool,
+) -> BreakoutObservation {
+    let start = movement.sample.time + 1;
+    let end = start + BREAKOUT_WINDOW_MS;
+    let trades = tokio::time::timeout(Duration::from_secs(15), async {
+        let delay = (end - 1 + VOLUME_DELAY_MS - now_ms()).max(0) as u64;
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        binance.trade_window(symbol, start, end).await
+    })
+    .await;
+    match trades {
+        Ok(Ok(trades)) => measure_breakout(trades, movement.target, upward),
+        _ => BreakoutObservation::Unavailable,
+    }
+}
+
+fn measure_breakout(trades: TradeWindow, target_price: f64, upward: bool) -> BreakoutObservation {
+    let Some(last) = trades.last else {
+        return BreakoutObservation::NoTrades;
+    };
+    let on_breakout_side = |price: f64| {
+        (price - target_price).abs() <= f64::EPSILON * price.max(target_price) * 4.0
+            || if upward {
+                price > target_price
+            } else {
+                price < target_price
+            }
+    };
+    let worst_price = if upward { trades.low } else { trades.high };
+    let position = if !on_breakout_side(last.price) {
+        BreakoutPosition::Lost
+    } else if !on_breakout_side(worst_price) {
+        BreakoutPosition::Recovered
+    } else {
+        BreakoutPosition::Held
+    };
+    let sell_usdt = trades.total - trades.taker_buy;
+    BreakoutObservation::Ready {
+        window_seconds: BREAKOUT_WINDOW_MS / 1_000,
+        buy_usdt: trades.taker_buy,
+        sell_usdt,
+        net_percent: (trades.taker_buy - sell_usdt) / trades.total * 100.0,
+        position,
+        target_price,
+        last_price: last.price,
+        last_trade_time: last.time,
+    }
+}
 
 pub struct Evaluation {
     pub id: String,
+    pub round_id: String,
     pub contract: Contract,
     pub trigger_time: i64,
     pub side: Side,
-    pub turnover: f64,
+    pub volume: Volume,
+    pub(crate) observation: Option<oneshot::Receiver<BreakoutObservation>>,
     pub rule: Rule,
     pub owner: String,
 }
@@ -32,13 +112,12 @@ pub struct Evaluation {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Score {
+    breakout_points: u8,
+    flow_points: u8,
     price_points: u8,
     turnover_points: u8,
-    liquidation_points: u8,
     total: u8,
     range_percent: Option<f64>,
-    dominant_side: Option<Side>,
-    near_share_percent: Option<f64>,
 }
 
 impl Score {
@@ -46,86 +125,65 @@ impl Score {
         rule: ContinuationRule,
         side: Side,
         range: Option<f64>,
-        turnover: f64,
-        model: Option<&Value>,
+        volume: Volume,
+        position: BreakoutPosition,
+        net_percent: f64,
     ) -> Self {
-        let price_points = if range.is_some_and(|range| range <= rule.max_range_percent) {
-            60
-        } else {
-            0
+        let breakout_points = match position {
+            BreakoutPosition::Held => 35,
+            BreakoutPosition::Recovered => 20,
+            BreakoutPosition::Lost => 0,
         };
-        let turnover_points = turnover_points(turnover, rule.turnover_multiple);
-        let risk = model.and_then(|model| liquidation_risk(model, side));
-        let liquidation_points = if risk
-            .is_some_and(|(dominant, near)| dominant == Some(side) && near >= MIN_NEAR_SHARE)
-        {
-            10
-        } else {
-            0
+        let aligned_net = if side == Side::Long { net_percent } else { -net_percent };
+        let aligned_share = ((100.0 + aligned_net) * 50.0).round() / 100.0;
+        let flow_points = match aligned_share {
+            share if share >= 70.0 => 35,
+            share if share >= 65.0 => 30,
+            share if share >= 60.0 => 20,
+            share if share >= 55.0 => 10,
+            _ => 0,
         };
+        let price_points = match range {
+            Some(range) if range <= rule.max_range_percent => 10,
+            Some(range) if range <= 2.0 * rule.max_range_percent => 5,
+            _ => 0,
+        };
+        let turnover_points = turnover_points(volume, rule.turnover_multiple);
         Self {
+            breakout_points,
+            flow_points,
             price_points,
             turnover_points,
-            liquidation_points,
-            total: price_points + turnover_points + liquidation_points,
+            total: breakout_points + flow_points + price_points + turnover_points,
             range_percent: range,
-            dominant_side: risk.and_then(|(dominant, _)| dominant),
-            near_share_percent: risk.map(|(_, near)| 100.0 * near),
         }
+    }
+
+    fn allows_entry(&self, position: BreakoutPosition) -> bool {
+        position != BreakoutPosition::Lost && self.total >= ORDER_SCORE
     }
 }
 
-fn turnover_points(multiple: f64, target: f64) -> u8 {
-    let tier = (multiple / target).floor().clamp(0.0, 3.0) as u8;
-    10 * tier
-}
-
-fn liquidation_risk(model: &Value, side: Side) -> Option<(Option<Side>, f64)> {
-    let mut totals = [0.0_f64; 2];
-    let mut near = 0.0;
-    let index = usize::from(side == Side::Short);
-    for level in model["levels"].as_array()? {
-        let bucket = match level["side"].as_str()? {
-            "long" => 0,
-            "short" => 1,
-            _ => return None,
-        };
-        let amount = number(&level["estimatedLiquidationUsdt"]).filter(|amount| *amount > 0.0)?;
-        let distance = number(&level["distancePercent"])?;
-        totals[bucket] += amount;
-        if bucket == index && distance.abs() <= NEAR_PERCENT {
-            near += amount;
-        }
-    }
-    if !totals.iter().all(|amount| amount.is_finite()) || totals == [0.0; 2] {
-        return None;
-    }
-    let dominant = match totals[0].total_cmp(&totals[1]) {
-        std::cmp::Ordering::Greater => Some(Side::Long),
-        std::cmp::Ordering::Less => Some(Side::Short),
-        std::cmp::Ordering::Equal => None,
+fn turnover_points(volume: Volume, target: f64) -> u8 {
+    let tier = (volume.multiple.unwrap_or_default() / target).floor().clamp(0.0, 3.0) as u8;
+    let absolute = match volume.turnover {
+        Some(amount) if amount >= 100_000.0 => 5,
+        Some(amount) if amount >= 10_000.0 => 3,
+        _ => 0,
     };
-    Some((
-        dominant,
-        if totals[index] > 0.0 {
-            near / totals[index]
-        } else {
-            0.0
-        },
-    ))
+    5 * tier + absolute
 }
 
 pub struct Evaluator {
     pub store: Arc<Store>,
     pub binance: Arc<Binance>,
-    pub liquidation: Arc<Loader>,
     pub trader: Arc<Trader>,
     pub stop: watch::Receiver<bool>,
     pub slots: Semaphore,
 }
 
 impl Evaluator {
-    pub async fn evaluate(&self, job: Evaluation) -> Result<()> {
+    pub async fn evaluate(&self, mut job: Evaluation) -> Result<()> {
         let account_revision = if job.rule.continuation.auto_trade {
             self.trader.auto_account_revision().await
         } else {
@@ -138,44 +196,32 @@ impl Evaluator {
                 .store
                 .finish_spike_evaluation(&job.id, &json!({"status":"interrupted"}));
         }
-        let range = tokio::time::timeout(
-            Duration::from_secs(12),
-            historical_range(&self.binance, &job),
-        )
-        .await
-        .ok()
-        .flatten();
-        let mut score =
-            Score::calculate(job.rule.continuation, job.side, range, job.turnover, None);
-        if score.price_points > 0 && score.turnover_points > 0 && current() {
-            let model = tokio::time::timeout(
-                Duration::from_secs(8),
-                self.liquidation.contract_levels(&job.contract.id),
-            )
-            .await
-            .ok()
-            .and_then(|result| result.ok());
-            score = Score::calculate(
-                job.rule.continuation,
-                job.side,
-                range,
-                job.turnover,
-                model.as_ref(),
-            );
-        }
+        let Some(observation) = job.observation.take() else {
+            return self.store.finish_spike_evaluation(&job.id, &json!({"status":"observation-unavailable","side":job.side,"target":ORDER_SCORE}));
+        };
+        let (range, observation) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(12), historical_range(&self.binance, &job)),
+            observation,
+        );
+        let Ok(BreakoutObservation::Ready { position, net_percent, .. }) = observation else {
+            let status = if current() { "observation-unavailable" } else { "interrupted" };
+            return self.store.finish_spike_evaluation(&job.id, &json!({"status":status,"side":job.side,"target":ORDER_SCORE}));
+        };
+        let score = Score::calculate(
+            job.rule.continuation, job.side, range.ok().flatten(), job.volume, position, net_percent,
+        );
         let mut result = json!({"score":score,"side":job.side,"target":ORDER_SCORE});
         let status = match (
-            range,
-            score.total >= ORDER_SCORE,
+            score.allows_entry(position),
             job.rule.continuation.auto_trade,
             account_revision,
         ) {
             _ if !current() => "interrupted",
-            (None, ..) => "unavailable",
-            (_, false, ..) => "below-score",
-            (_, _, false, _) => "disabled",
-            (_, _, _, None) => "no-account",
-            (_, _, _, Some(account_revision)) => {
+            _ if position == BreakoutPosition::Lost => "breakout-lost",
+            (false, ..) => "below-score",
+            (_, false, _) => "disabled",
+            (_, _, None) => "no-account",
+            (_, _, Some(account_revision)) => {
                 let mut submitting = result.clone();
                 submitting["status"] = json!("submitting");
                 let guard = |claim: bool| {
@@ -208,16 +254,19 @@ impl Evaluator {
                     limit_exit_percent: Some(job.rule.continuation.limit_exit_percent()),
                     max_hold_seconds: 300,
                     note: format!(
-                        "异动延续评分 {} 分（涨跌幅 {} / 成交额 {} / 强平估算 {}）",
+                        "异动延续评分 {} 分（突破 {} / 主动买卖 {} / 成交额 {} / 历史振幅 {}）",
                         score.total,
-                        score.price_points,
+                        score.breakout_points,
+                        score.flow_points,
                         score.turnover_points,
-                        score.liquidation_points
+                        score.price_points
                     ),
                 };
                 match self
                     .trader
-                    .submit_guarded(intent, account_revision, guard)
+                    .submit_guarded(intent, account_revision, Some(RoundOrder {
+                        round_id: &job.round_id, signal_id: &job.id, increase: None,
+                    }), guard)
                     .await
                 {
                     Ok(trade) => {
@@ -293,62 +342,80 @@ async fn historical_range(binance: &Binance, job: &Evaluation) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::Sample;
 
     #[test]
-    fn volume_tiers_and_price_range_control_the_order_score() {
-        let rule = ContinuationRule::default();
-        for (multiple, points) in [
-            (4.99, 0),
-            (5.0, 10),
-            (9.99, 10),
-            (10.0, 20),
-            (14.99, 20),
-            (15.0, 30),
-            (99.0, 30),
+    fn breakout_observation_reports_taker_flow_and_both_directions_of_price_holding() {
+        use BreakoutPosition::{Held, Lost, Recovered};
+        for (upward, low, high, last, position) in [
+            (true, 105.0, 106.0, 106.0, Held),
+            (true, 103.0, 106.0, 105.0, Recovered),
+            (true, 103.0, 106.0, 103.0, Lost),
+            (false, 104.0, 105.0, 104.0, Held),
+            (false, 104.0, 106.0, 105.0, Recovered),
+            (false, 104.0, 106.0, 106.0, Lost),
         ] {
-            assert_eq!(turnover_points(multiple, rule.turnover_multiple), points);
+            let trades = TradeWindow {
+                total: 500.0,
+                taker_buy: 350.0,
+                low,
+                high,
+                last: Some(Sample { time: 6_000, price: last }),
+            };
+            assert_eq!(measure_breakout(trades, 105.0, upward), BreakoutObservation::Ready {
+                window_seconds: 5,
+                buy_usdt: 350.0,
+                sell_usdt: 150.0,
+                net_percent: 40.0,
+                position,
+                target_price: 105.0,
+                last_price: last,
+                last_trade_time: 6_000,
+            });
         }
-        assert_eq!(
-            Score::calculate(rule, Side::Long, Some(5.0), 10.0, None).total,
-            ORDER_SCORE
-        );
-        assert_eq!(
-            Score::calculate(rule, Side::Long, Some(5.01), 15.0, None).total,
-            30
-        );
-        assert_eq!(
-            Score::calculate(rule, Side::Short, None, 15.0, None).total,
-            30
-        );
+        assert_eq!(measure_breakout(TradeWindow::default(), 105.0, true), BreakoutObservation::NoTrades);
     }
 
     #[test]
-    fn liquidation_points_require_the_requested_side_and_a_nearby_concentration() {
+    fn turnover_weights_relative_and_absolute_volume() {
         let rule = ContinuationRule::default();
-        let levels = |side: &str, other: &str, distance: f64| {
-            json!({"levels":[
-            {"side":side,"estimatedLiquidationUsdt":20,"distancePercent":distance},
-            {"side":side,"estimatedLiquidationUsdt":80,"distancePercent":12},
-            {"side":other,"estimatedLiquidationUsdt":50,"distancePercent":3}]})
-        };
-        let short = levels("short", "long", 5.0);
-        let long = levels("long", "short", -5.0);
-        let distant = levels("short", "long", 5.01);
-        assert_eq!(
-            Score::calculate(rule, Side::Short, Some(2.0), 5.0, Some(&short)).total,
-            ORDER_SCORE
-        );
-        assert_eq!(
-            Score::calculate(rule, Side::Long, Some(2.0), 5.0, Some(&long)).total,
-            ORDER_SCORE
-        );
-        assert_eq!(
-            Score::calculate(rule, Side::Long, Some(2.0), 5.0, Some(&short)).total,
-            70
-        );
-        assert_eq!(
-            Score::calculate(rule, Side::Short, Some(2.0), 5.0, Some(&distant)).total,
-            70
-        );
+        for (amount, multiple, points) in [
+            (9_999.0, 4.99, 0),
+            (10_000.0, 5.0, 8),
+            (99_999.0, 10.0, 13),
+            (100_000.0, 14.99, 15),
+            (100_000.0, 15.0, 20),
+        ] {
+            let volume = Volume { turnover: Some(amount), baseline: None, multiple: Some(multiple) };
+            assert_eq!(turnover_points(volume, rule.turnover_multiple), points);
+        }
+    }
+
+    #[test]
+    fn high_or_missing_historical_range_can_pass_with_a_held_breakout_and_aligned_flow() {
+        use BreakoutPosition::{Held, Lost, Recovered};
+        let rule = ContinuationRule::default();
+        let volume = Volume::new(Some(150_000.0), Some(10_000.0));
+        for (side, net_percent) in [(Side::Long, 40.0), (Side::Short, -40.0)] {
+            for (range, price_points) in [(Some(5.0), 10), (Some(10.0), 5), (Some(40.54), 0), (None, 0)] {
+                let score = Score::calculate(rule, side, range, volume, Held, net_percent);
+                assert_eq!(score.total, 90 + price_points);
+                assert_eq!(score.price_points, price_points);
+                assert!(score.allows_entry(Held));
+            }
+            let opposite = Score::calculate(rule, side, Some(5.0), volume, Held, -net_percent);
+            assert_eq!(opposite.flow_points, 0);
+            assert!(!opposite.allows_entry(Held));
+            let lost = Score::calculate(rule, side, Some(5.0), volume, Lost, net_percent);
+            assert_eq!(lost.breakout_points, 0);
+            assert!(!lost.allows_entry(Lost));
+            let recovered = Score::calculate(rule, side, Some(10.0), volume, Recovered, net_percent);
+            assert_eq!(recovered.total, ORDER_SCORE);
+            assert!(recovered.allows_entry(Recovered));
+        }
+        for (net_percent, flow_points) in [(0.0, 0), (10.0, 10), (20.0, 20), (30.0, 30), (40.0, 35)] {
+            let score = Score::calculate(rule, Side::Long, None, volume, Held, net_percent);
+            assert_eq!(score.flow_points, flow_points);
+        }
     }
 }

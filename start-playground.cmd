@@ -4,13 +4,8 @@ setlocal DisableDelayedExpansion
 pushd "%~dp0docs\playground" || goto :missing_project
 
 set "PLAYGROUND_PORT=3000"
-set "PLAYGROUND_MONITOR_ONLY="
 set "PLAYGROUND_NODE_MIN=24"
 if not "%~1"=="" set "PLAYGROUND_PORT=%~1"
-if /i "%~1"=="monitor" (
-    set "PLAYGROUND_MONITOR_ONLY=1"
-    set "PLAYGROUND_PORT=3000"
-)
 if /i "%~1"=="rust" (
     set "PLAYGROUND_PORT=3000"
     if not "%~2"=="" set "PLAYGROUND_PORT=%~2"
@@ -40,17 +35,13 @@ if errorlevel 1 (
 )
 
 set "PLAYGROUND_URL=http://127.0.0.1:%PLAYGROUND_PORT%/"
-if defined PLAYGROUND_MONITOR_ONLY goto :prepare
 curl.exe --noproxy "*" --fail --silent --max-time 5 "%PLAYGROUND_URL%" 2>nul | findstr /L /C:"<title>CCXT Markets</title>" >nul
 if not errorlevel 1 (
-    echo This port already serves a CCXT Markets instance. Stop it or choose another port.
+    echo CCXT Markets is already running. Reopen %PLAYGROUND_URL% to manage monitoring.
     goto :failed
 )
 
-:prepare
 call :configure_proxy
-
-if defined PLAYGROUND_MONITOR_ONLY goto :monitor
 
 if not exist "node_modules\next\dist\bin\next" (
     echo Installing Playground dependencies...
@@ -59,14 +50,9 @@ if not exist "node_modules\next\dist\bin\next" (
 )
 
 echo Open the market lookup after Next.js is ready: %PLAYGROUND_URL%
+echo Enable or disable monitoring on the market page. Closing the browser keeps the saved monitoring rule active.
 echo Press Ctrl+C in this window to stop the server.
 "%PLAYGROUND_NODE%" "scripts\start-rust-markets.mjs"
-if errorlevel 1 goto :failed
-popd
-exit /b 0
-
-:monitor
-"%PLAYGROUND_NODE%" "scripts\start-rust-markets.mjs" --monitor-only
 if errorlevel 1 goto :failed
 popd
 exit /b 0

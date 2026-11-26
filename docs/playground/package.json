@@ -7,7 +7,6 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "monitor": "node scripts/start-rust-markets.mjs --monitor-only",
     "lint": "next lint",
     "setup-runtimes": "bash scripts/setup-runtimes.sh"
   },

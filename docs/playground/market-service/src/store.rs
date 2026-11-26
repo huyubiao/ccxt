@@ -219,23 +219,14 @@ impl Store {
         let db = self.db()?;
         let rule = read_rule(&db)?;
         let worker: String = db.query_row("SELECT CASE WHEN owner IS NOT NULL AND heartbeat > ? THEN state ELSE 'offline' END FROM monitor_worker WHERE key = 1", [now - LEASE_MS], |row| row.get(0))?;
-        let mut records = query_json(&db, "SELECT json_object('id',id,'event',json(event),'confirmedAt',confirmedAt,'delivery',delivery,
+        let offline = worker == "offline";
+        let records = query_json(&db, "SELECT json_object('id',id,'event',json(CASE
+             WHEN ? AND json_extract(event,'$.breakoutObservation.status') = 'pending'
+             THEN json_set(event,'$.breakoutObservation.status','interrupted') ELSE event END),'confirmedAt',confirmedAt,'delivery',delivery,
             'attempts',attempts,'lastAttempt',lastAttempt,'lastResult',lastResult)
             FROM monitor_alert AS alert WHERE NOT EXISTS (SELECT 1 FROM monitor_deleted_spike WHERE symbol = json_extract(alert.event, '$.symbol')
                 AND time = json_extract(alert.event, '$.time') AND threshold = json_extract(alert.event, '$.threshold'))
-            ORDER BY confirmedAt DESC, id DESC LIMIT 100", [])?;
-        for record in &mut records {
-            let event = &mut record["event"];
-            if event["forecastDirection"].is_null() {
-                event["forecastDirection"] =
-                    json!(if event["change"].as_f64().unwrap_or(0.0) > 0.0 {
-                        "up"
-                    } else {
-                        "down"
-                    });
-            }
-        }
-        let offline = worker == "offline";
+            ORDER BY confirmedAt DESC, id DESC LIMIT 100", [offline])?;
         let spikes = query_json(&db, "SELECT json_set(event, '$.status', CASE WHEN ? AND status = 'pending' THEN 'interrupted' ELSE status END)
             FROM monitor_spike AS spike WHERE NOT EXISTS (SELECT 1 FROM monitor_deleted_spike WHERE id = spike.id)
             ORDER BY time DESC, id DESC LIMIT 100", [offline])?;
@@ -347,6 +338,21 @@ impl Store {
             "UPDATE monitor_alert SET event=json_set(event,'$.context',json(?)) WHERE id=?",
             params![context.to_string(), id],
         )?;
+        Ok(())
+    }
+
+    pub fn finish_breakout_observation(&self, id: &str, owner: &str, observation: &Value) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event = json_set(event, '$.breakoutObservation', json(?))
+            WHERE id = ? AND json_extract(event, '$.breakoutObservation.status') = 'pending'
+            AND EXISTS (SELECT 1 FROM monitor_worker WHERE key = 1 AND owner = ?)",
+            params![observation.to_string(), id, owner])?;
+        Ok(())
+    }
+
+    pub fn interrupt_breakout_observations(&self, owner: &str) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event = json_set(event, '$.breakoutObservation.status', 'interrupted')
+            WHERE json_extract(event, '$.breakoutObservation.status') = 'pending'
+            AND EXISTS (SELECT 1 FROM monitor_worker WHERE key = 1 AND owner = ?)", [owner])?;
         Ok(())
     }
 
@@ -619,12 +625,25 @@ mod tests {
         })).unwrap();
         assert_eq!(old.up, None);
         assert!(old.is_valid());
+        assert_eq!(old.observation, crate::strategy::ObservationRule::default());
         assert!(!old.continuation.auto_trade);
         assert_eq!(old.continuation.lookback_hours, 24);
         assert_eq!(old.continuation.max_range_percent, 5.0);
         assert_eq!(old.continuation.turnover_multiple, 5.0);
         assert_eq!(old.continuation.stop_loss_percent, 1.0);
         assert_eq!(old.continuation.take_profit_percent, 1.0);
+    }
+
+    #[test]
+    fn saves_independent_observation_settings_with_the_monitor_rule() {
+        let store = Store::open_memory().unwrap();
+        let rule = Rule {
+            observation: crate::strategy::ObservationRule { minutes: 22, up_percent: 3.25, down_percent: 7.0 },
+            ..Rule::default()
+        };
+        store.save_rule(rule).unwrap();
+        assert_eq!(store.rule().unwrap(), rule);
+        assert_eq!(store.status(1_000).unwrap()["rule"]["observation"], json!({"minutes":22,"upPercent":3.25,"downPercent":7.0}));
     }
 
     #[test]
@@ -681,6 +700,34 @@ mod tests {
         let status = store.status(5_000).unwrap();
         assert_eq!(status["records"][0]["event"]["continuation"]["status"], "interrupted");
         assert_eq!(status["records"][1]["event"]["continuation"]["status"], "unknown");
+    }
+
+    #[test]
+    fn breakout_observations_and_order_scores_persist_independently() {
+        let store = Store::open_memory().unwrap();
+        let rule = Rule { enabled: true, ..Rule::default() };
+        store.save_rule(rule).unwrap();
+        assert!(store.heartbeat("owner", "connected", 5_000).unwrap());
+        let pending = json!({"symbol":"BTCUSDT","time":5000,"threshold":5,
+            "continuation":{"status":"pending"},"breakoutObservation":{"status":"pending"}});
+        assert!(store.confirm("first", &pending, rule, "owner", 0, 5_000).unwrap());
+        let observed = json!({"status":"ready","position":"held"});
+        store.finish_breakout_observation("first", "another owner", &observed).unwrap();
+        assert_eq!(store.status(5_000).unwrap()["records"][0]["event"]["breakoutObservation"]["status"], "pending");
+        store.finish_breakout_observation("first", "owner", &observed).unwrap();
+        let score = json!({"status":"below-score","score":{"total":30}});
+        store.finish_spike_evaluation("first", &score).unwrap();
+        let status = store.status(5_000).unwrap();
+        let saved = &status["records"][0]["event"];
+        assert_eq!(saved["breakoutObservation"], observed);
+        assert_eq!(saved["continuation"], score);
+
+        assert!(store.confirm("second", &pending, rule, "owner", 0, 5_001).unwrap());
+        store.interrupt_breakout_observations("owner").unwrap();
+        store.finish_breakout_observation("second", "owner", &observed).unwrap();
+        let status = store.status(5_001).unwrap();
+        assert_eq!(status["records"][0]["event"]["breakoutObservation"]["status"], "interrupted");
+        assert_eq!(status["records"][1]["event"]["breakoutObservation"], observed);
     }
 
     #[test]
