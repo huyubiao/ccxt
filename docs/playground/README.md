@@ -429,6 +429,14 @@ saves that choice and monitors with the same rule after the webpage or browser
 closes, as long as the launcher is running. When you reopen the page, it shows
 the saved state. A later launch also reads the saved rule. On the public
 Playground, keep the market page open for browser-based monitoring.
+
+The **交易策略 → 运行状态** panel polls the Rust health endpoint and shows its
+last successful response. The monitor shows **运行中 · 后台** after the worker
+reports a fresh quote for a monitored contract. To configure automatic orders,
+open **异动监控策略 → 自动下单**. The test strategy runs on manual request. If the
+web page loses contact with Rust, it reports the backend strategy status as
+unknown until it can read it again.
+
 Set the window in whole seconds (10 to 300, default 30)
 and enable upward alerts, downward alerts, or both, with separate thresholds.
 New rules start with both directions selected at 5%.
@@ -446,10 +454,10 @@ The first price trigger fixes the original reference price and direction for
 that symbol. The observation period starts when the first alert is confirmed.
 The observation duration is
 configurable in whole minutes and defaults to 15. The separate upward and
-downward observation steps both default to 5%. Levels compound from the
+downward observation steps both default to 3%. Levels compound from the
 original reference using the step for the first trigger's direction. With a
-reference of 100 and both initial and observation thresholds set to 5%, the
-upward levels are 105, 110.25, and 115.7625. Bands already crossed at the first
+reference of 100, an initial threshold of 5%, and an observation step of 3%, the
+upward levels are 105, 106.09, and 109.2727. Bands already crossed at the first
 trigger count as reached. A sample can cross multiple new bands and reports the
 highest one. Each upgrade restarts the full observation period from the price
 triggering it. For a 15-minute period, a first alert confirmed at 10:00 and an upgrade
@@ -532,18 +540,42 @@ USDT 金额或交易所最小下单量、杠杆、止损 %、止盈 %、可选�
    - 保护单已触发且只成交了一部分时，撤销限价平仓单并市价平掉剩余仓位。
    - 持仓到期时，撤销未完成的限价单，再对剩余仓位市价平仓。
 
-本地异动监控每轮首次确认告警后评估开仓，使用该条告警触发后 5 秒的聚合成交。四项总分为 100 分。
+本地异动监控每轮首次确认告警后评估开仓，后续升级告警记录独立评分。走势评估使用触发后 5 秒的聚合成交，主动成交使用完整告警区间。三项基础满分 100 分，成交额作为额外加分。
 
-- **突破站稳 35 分**。上涨看门槛上方，下跌看门槛下方，等于门槛也算守住。全程守住得 35 分，
-  中途退回但最后一笔成交回到突破侧得 20 分，最后一笔退回另一侧得 0 分并跳过下单。
-- **同向主动成交 35 分**。以 USDT 成交金额计算占比。上涨取主动买入占比，下跌取主动卖出占比。
-  同向占比四舍五入到两位小数，达到 55%、60%、65%、70% 分别得 10、20、30、35 分，低于 55% 得 0 分。
-- **告警成交额 20 分**。评分基准默认 5 倍，在 **自动下单** 单独设置。达到基准的 1、2、3 倍分别得 5、10、15 分。
-  原告警窗口的绝对成交额达到 1 万、10 万 USDT 分别额外得 3、5 分，取最高一档。
-- **异动前历史振幅 10 分**。在异动窗口开始前取最近 X 小时的完整 K 线。
-  按 `(最高价 − 最低价) ÷ 最低价 × 100%` 计算。振幅不超过基准得 10 分，超过基准但在基准两倍以内得 5 分，
-  超过两倍或历史数据不足得 0 分。X 默认为 24 小时，评分基准默认为 5%。
+- **走势评估 35 分**。门槛价使用本条告警的实际触发价，参考价使用本条告警记录里的参考价。
+  从触发后的下一毫秒开始观察 5 秒，上涨看最低成交价，下跌看最高成交价，并结合最后一笔成交价按以下顺序判定，取符合条件的最高档。
+  - **突破后站稳，35 分**。上涨时全程不低于门槛价；下跌时全程不高于门槛价。
+  - **回吐后收复，30 分**。中途退回门槛另一侧，最后一笔重新回到门槛或突破侧。
+  - **回吐未失守，20 分**。最后一笔退回门槛内，但仍保留至少四分之三的突破幅度。
+  - **回吐一半，15 分**。最后一笔保留至少一半、不到四分之三的突破幅度。
+  - **回吐即将失守，5 分**。最后一笔仍在参考价的突破侧，但保留幅度不到一半。
+  - **失守，0 分**。最后一笔回到或越过参考价，跳过下单。恰好等于参考价也计 0 分。
+  四分之三界线为 `参考价 + (门槛价 - 参考价) × 3/4`，一半界线为 `(门槛价 + 参考价) / 2`，等于界线归入较高档。
+  例如上涨参考价为 100、门槛价为 110，最后一笔在 107.5 至 110 之间得 20 分，在 105 至 107.5 之间得 15 分，
+  在 100 至 105 之间得 5 分；各区间包含下界但不含上界，100 本身计 0 分。下跌时按相反方向比较。
+  告警详情同时展示门槛价、参考价、最不利成交价和最后成交价，历史记录保留当时的评分。
+- **同向主动成交 + 订单簿深度 35 分**。主动成交以 USDT 成交金额计算占比，上涨取主动买入占比，下跌取主动卖出占比。
+  首次告警统计“参考价最后一次出现”到“告警触发”之间的成交。后续每次升级，统计“上一次告警”到“本次告警”之间的成交。
+  跳级时以实际上一条告警为起点。完整分钟使用 K 线的成交额与主动买入金额，首尾不足一分钟的部分使用聚合成交。
+  同向占比四舍五入到两位小数，达到 55%、60%、65%、70%、75% 分别得 10、15、20、30、35 分，低于 55% 得 0 分。
+  订单簿在告警确认后立即发起请求，获取买卖两侧各最多 1000 档深度快照，逐档按价格乘数量汇总 USDT 挂单金额，实际快照时间见告警详情。
+  上涨取买盘金额除以买卖盘总金额，下跌取卖盘金额除以买卖盘总金额。
+  挂单占比四舍五入到两位小数，达到 60%、65%、70%、75%、80% 及以上分别补充 5、10、15、20、25 分，低于 60% 得 0 分。
+  两项相加封顶 35 分。深度快照缺失、过期或无效时补充 0 分；完整区间成交不可用时跳过下单。
+  告警详情展示区间起止、主动买卖金额、同向占比、深度快照时间、买卖盘档数和金额，以及两项分数。
+  历史记录按其保存的原评分展示。盘口采用告警确认后请求的快照，历史成交回放需要另有对应时刻的深度数据才能补算。
+- **异动前横盘平静度 30 分**。本轮首次告警计算一次并保存，后续升级沿用首报的区间、指标和分数。历史数据不足或请求失败计 0 分，同轮沿用这一结果。
+  回看首报异动窗口开始之前的 X 小时，默认 24 小时，仅使用已结束且连续完整的 1 分钟 K 线。
+  - 整体振幅为（最高价 − 最低价）÷ 最低价 × 100%。不超过 5% 得 10 分，超过 5% 且不超过 8% 得 5 分，超过 8% 得 0 分。
+  - 前后偏移为 |后半段平均收盘价 ÷ 前半段平均收盘价 − 1| × 100%。不超过 1% 得 10 分，超过 1% 且不超过 2% 得 5 分，超过 2% 得 0 分。
+  - 最大单根振幅为各根（最高价 − 最低价）÷ 开盘价 × 100% 的最大值。不超过 1% 得 10 分，超过 1% 且不超过 2% 得 5 分，超过 2% 得 0 分。
+  各项直接按原始数值评分，界线包含等号。方向偏移取绝对值，上涨和下跌按同一标准评分。
+- **告警成交额额外加分，最多 20 分**。首次告警的成交额倍数严格超过 100、200、400、700、1000 倍，分别加 3、5、10、15、20 分。
+  升级时使用上一次告警之后至本次触发的实际区间成交额，除以上一次告警的成交额。严格超过 5、10、20、50、100 倍，分别加 3、5、10、15、20 分。
+  第一次升级的分母为首报成交额核验窗口的金额，后续分母为上一条升级区间的实际成交额。跳级按实际上一条告警比较。分母为 0 或数据不可用时加 0 分。
+  取满足条件的最高一档，恰好等于门槛归入较低档。金额与区间长度一起展示，便于比较放量情况。
 
+走势评估 35 分、同向主动成交与深度 35 分、横盘平静度 30 分，基础满分 100 分，加成交额奖励最高 120 分。
 连接币安账号并开启 **自动下单** 后，总分至少 80 分的告警可触发 1 倍杠杆市价开仓，上涨做多、下跌做空。
 市价数量按账户所在交易环境的最低名义金额、最小数量、数量步长及标记价计算，仍受单笔金额和持仓上限约束。
 在 **自动下单** 可设置新开仓的止损和止盈百分比，默认各 1%。清空输入框后，离开输入框或保存时会恢复该项默认值。
@@ -551,7 +583,7 @@ USDT 金额或交易所最小下单量、杠杆、止损 %、止盈 %、可选�
 价格按币安合约的步长校准。挂单和保护单由后台自动处理，最长持仓 5 分钟。
 自动下单默认关闭。登录或登出后需要重新开启。
 5 秒窗口无成交或观察数据不可用时跳过下单。从该轮初次触发起超过 45 秒的信号不再开仓。
-同一轮后续升级沿用首次核验的成交额。开仓评分使用首次确认告警，后续补仓需要独立的下单信号。展开 **告警记录 → 延续评分与下单** 可查看买卖占比、
+同一轮升级的主动成交和成交额奖励按实际告警区间重新计算，横盘平静度沿用首报结果。开仓使用首次确认告警，升级评分用于观察，后续补仓需要独立的下单信号。展开 **告警记录 → 延续评分与下单** 可查看买卖占比、
 突破状态、评分和下单结果。强平估算可在 **币种深度调研** 查看。**下单记录** 展示测试策略和异动监控策略的交易。
 
 执行层按异动轮次、下单信号和目标交易处理补仓。策略提供累计持仓上限，每笔补仓仍受单笔金额上限约束。

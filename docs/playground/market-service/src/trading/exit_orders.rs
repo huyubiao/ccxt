@@ -210,7 +210,11 @@ impl Trader {
                     .any(|order| working(order, Some(kind)) && order.exchange_id.is_some())
                 {
                     self.replace_protection(core, trade, kind, price, amount)
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            let label = if kind == STOP_LOSS { "止损" } else { "止盈" };
+                            format!("开仓已成交，{label}挂单失败（触发价 {price}）：{error}")
+                        })?;
                 }
             }
             Ok::<_, String>(prices.limit)

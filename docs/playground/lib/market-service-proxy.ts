@@ -1,6 +1,6 @@
 import { Agent } from "undici";
 
-type RustMarketRoute = "/api/markets/contracts" | "/api/markets/alert-context" |
+type RustMarketRoute = "/health" | "/api/markets/contracts" | "/api/markets/alert-context" |
   "/api/markets/background-monitor" | "/api/strategy-notifications" | "/api/markets/directory" |
   "/api/markets/ticker" | "/api/markets/order-book" | "/api/markets/funding-rates" | "/api/markets/liquidations" |
   "/api/markets/volume" | "/api/markets/contract-market-caps" | "/api/markets/fundamentals" | "/api/markets/holders" |
@@ -31,7 +31,7 @@ export async function proxyMarketRequest(route: RustMarketRoute, request: Reques
       }
       headers.set("authorization", `Bearer ${token}`);
     }
-    const timeout = AbortSignal.timeout(60_000);
+    const timeout = AbortSignal.timeout(route === "/health" ? 4_000 : 60_000);
     const options = {
       method: request.method, headers, body, cache: "no-store", redirect: "error",
       dispatcher: requiresToken ? loopbackAgent : undefined,

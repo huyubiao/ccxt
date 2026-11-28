@@ -22,6 +22,8 @@ import DingTalkSettings from "./dingtalk-settings";
 import BinanceSettings from "./binance-settings";
 import TestStrategy from "./test-strategy";
 import TradeRecords from "./trade-records";
+import StrategyRuntimeStatus from "./strategy-runtime-status";
+import { useMarketServiceHealth } from "./use-market-service-health";
 import { useRememberedDetails } from "./use-remembered-details";
 import { useTrading } from "./use-trading";
 import styles from "./markets.module.css";
@@ -78,8 +80,6 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [observation, setObservation] = useState(DEFAULT_ALERT_OBSERVATION);
   const [observationInput, setObservationInput] = useState(() => observationInputs(DEFAULT_ALERT_OBSERVATION));
   const [lookbackInput, setLookbackInput] = useState(String(defaultContinuationRule.lookbackHours));
-  const [rangeInput, setRangeInput] = useState(String(defaultContinuationRule.maxRangePercent));
-  const [scoreTurnoverInput, setScoreTurnoverInput] = useState(String(defaultContinuationRule.turnoverMultiple));
   const [spikeStopInput, setSpikeStopInput] = useState(String(defaultContinuationRule.stopLossPercent));
   const [spikeTakeInput, setSpikeTakeInput] = useState(String(defaultContinuationRule.takeProfitPercent));
   const [invalid, setInvalid] = useState<"up" | "down" | "directions" | "seconds" | "turnover" | "observation" | null>(null);
@@ -87,6 +87,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   const [recordsReady, setRecordsReady] = useState(false);
   const background = useBackgroundMonitor();
   const trading = useTrading();
+  const health = useMarketServiceHealth();
   const server = background.mode === "local";
   const canEdit = background.mode !== "loading" && !background.saving && !background.deleting;
   const serverRule = background.data?.configured ? background.data.rule : null;
@@ -146,11 +147,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
 
   useEffect(() => {
     setLookbackInput(String(continuation.lookbackHours));
-    setRangeInput(String(continuation.maxRangePercent));
-    setScoreTurnoverInput(String(continuation.turnoverMultiple));
     setSpikeStopInput(String(continuation.stopLossPercent));
     setSpikeTakeInput(String(continuation.takeProfitPercent));
-  }, [continuation.lookbackHours, continuation.maxRangePercent, continuation.turnoverMultiple,
+  }, [continuation.lookbackHours,
     continuation.stopLossPercent, continuation.takeProfitPercent]);
 
   useLayoutEffect(() => {
@@ -497,8 +496,7 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
     setSpikeStopInput(stopInput);
     setSpikeTakeInput(takeInput);
     saveServerRule({ continuation: {
-      ...continuation, lookbackHours: Number(lookbackInput), maxRangePercent: Number(rangeInput),
-      turnoverMultiple: Number(scoreTurnoverInput),
+      ...continuation, lookbackHours: Number(lookbackInput),
       stopLossPercent: Number(stopInput), takeProfitPercent: Number(takeInput),
     } });
   }
@@ -562,7 +560,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   }
 
   const worker = background.data?.worker;
-  const monitoringStatus = background.mode === "loading" ? "正在读取监控状态"
+  const monitoringStatus = background.mode !== "browser" && (health.state === "unavailable" || background.readError)
+    ? "无法确认监控状态" : background.mode === "loading" ? "正在读取监控状态"
     : !strategyEnabled ? "监控已停止"
     : server ? worker === "connected" ? "行情已连接 · 关闭网页后继续"
       : worker === "offline" ? "监控进程离线，正在重试" : "正在连接行情"
@@ -649,13 +648,14 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             当前设置 {displayedSeconds} 秒 / {[
               displayedThresholds.up !== null ? `上涨 ${formatPercent.format(displayedThresholds.up)}%` : null,
               displayedThresholds.down !== null ? `下跌 ${formatPercent.format(displayedThresholds.down)}%` : null,
-            ].filter(Boolean).join(" / ")} / 观察 {displayedObservation.minutes} 分钟 / 成交额 ≥ {displayedMultiple} 倍 · {monitoringStatus}
+            ].filter(Boolean).join(" / ")} / 观察 {displayedObservation.minutes} 分钟
+            {" / 观察期上涨幅度 "}{formatPercent.format(displayedObservation.upPercent)}%
+            {" / 观察期下跌幅度 "}{formatPercent.format(-displayedObservation.downPercent)}%
+            {" / "}成交额 ≥ {displayedMultiple} 倍 · {monitoringStatus}
           </p>
           {directoryError && <p role="status">合约列表同步失败，正在重试。</p>}
           <div className={styles.monitorHelp}>
-            <p><strong>告警怎么升级？</strong> 价格达到涨跌阈值时，先记入告警记录。每轮只有第一次告警要检查成交额。</p>
-            <p>例如原始参考价为 100，首次涨到 105 且成交额达标，确认 1 级告警。观察期涨幅为 5% 时，之后达到 110.25、115.7625 时依次升级。观察期设为 15 分钟时，10:00 确认首报、10:10 升级，截止时间延到 10:25。</p>
-            <p>价格回撤后仍在原始参考价同一侧，就继续观察，只在达到新档位时升级。首次成交额核验失败或中断时，恢复短窗口监控。</p>
+            <p><strong>告警升级：</strong> 例如原始参考价为 100，首次涨到 105 且成交额达标，确认 1 级告警。观察期涨幅为 3% 时，之后达到 106.09、109.2727 时依次升级告警。告警升级后，观察期时间重新计算。</p>
           </div>
           <p>监控币种深度调研名单里的全部币安 USDT 本位永续合约。{server
             ? "启用状态保存在本地后台，关闭网页后继续监控。要停止监控，可重新打开本页关闭策略。"
@@ -672,15 +672,9 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
             </label>}
           </div>
           {server && <form className={styles.monitorForm} onSubmit={saveContinuation}>
-            <label htmlFor="spike-lookback-hours">异动前回看（小时）</label>
+            <label htmlFor="spike-lookback-hours">异动前回看窗口（小时）</label>
             <input id="spike-lookback-hours" type="number" min={1} max={4_294_967_295} step={1} required value={lookbackInput}
               onChange={(event) => setLookbackInput(event.target.value)} />
-            <label htmlFor="spike-range-percent">历史振幅计分基准（%）</label>
-            <input id="spike-range-percent" type="number" min={0} max={50} step="any" required value={rangeInput}
-              onChange={(event) => setRangeInput(event.target.value)} />
-            <label htmlFor="spike-score-turnover">评分基准成交额倍数</label>
-            <input id="spike-score-turnover" type="number" min={1} step="any" required value={scoreTurnoverInput}
-              onChange={(event) => setScoreTurnoverInput(event.target.value)} />
             <label htmlFor="spike-stop-loss">新开仓止损（%）</label>
             <input id="spike-stop-loss" type="number" min={0.1} max={20} step="any" value={spikeStopInput}
               onChange={(event) => setSpikeStopInput(event.target.value)}
@@ -702,15 +696,17 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
           {server && !trading.data?.enabled && <p>连接「账号设置」中的币安模拟盘或实盘后可启用自动下单。</p>}
           {background.mode === "browser" && <p>自动下单由本地后台监控执行。</p>}
           <div className={styles.monitorHelp}>
-            <p><strong>突破站稳（35 分）</strong> 触发后 5 秒内始终守住门槛得 35 分，回吐后收复得 20 分，失守时跳过下单。</p>
-            <p><strong>同向主动成交（35 分）</strong> 上涨看主动买入占比，下跌看主动卖出占比。达到 55%、60%、65%、70% 分别得 10、20、30、35 分。</p>
-            <p><strong>告警成交额（20 分）</strong> 以 {continuation.turnoverMultiple} 倍为评分基准，达到基准的 1、2、3 倍分别得 5、10、15 分。成交额达到 1 万、10 万 USDT 分别加 3、5 分。</p>
-            <p><strong>异动前历史振幅（10 分）</strong> 取异动窗口前 {continuation.lookbackHours} 小时的完整 K 线。振幅 ≤ {continuation.maxRangePercent}% 得 10 分，超过基准但在两倍以内得 5 分，其他情况得 0 分。</p>
-            <p>首次确认告警后评估开仓。总分 ≥ 80 且开启自动下单时，上涨做多、下跌做空，以 1 倍杠杆提交币安允许的最小市价单。首次信号有效期 45 秒。</p>
+            <p><strong>走势评估（35 分）</strong> 门槛价为本条告警的实际触发价。观察触发后 5 秒，上涨看最低成交价，下跌看最高成交价，并结合最后一笔成交价判断。</p>
+            <p>突破后站稳得 35 分，回吐后收复得 30 分；最后一笔保留至少四分之三突破幅度得 20 分，至少一半得 15 分，不到一半但仍在参考价突破侧得 5 分。回到或越过参考价得 0 分并跳过下单。</p>
+            <p><strong>同向主动成交 + 订单簿深度（35 分）</strong> 完整告警区间内，上涨取主动买入占比，下跌取主动卖出占比。达到 55%、60%、65%、70%、75% 分别得 10、15、20、30、35 分。</p>
+            <p>首次告警统计“参考价最后一次出现”到“告警触发”之间的成交。后续每次升级，统计“上一次告警”到“本次告警”之间的成交。告警确认后立即请求买卖两侧各最多 1000 档深度快照，按 USDT 挂单金额计算。上涨取买挂单占比，下跌取卖挂单占比，达到 60%、65%、70%、75%、80% 及以上分别加 5、10、15、20、25 分，低于 60% 得 0 分。两项相加封顶 35 分，快照不可用时补充分数为 0。</p>
+            <p><strong>告警成交额额外加分（最多 20 分）</strong> 首报成交额倍数严格超过 100、200、400、700、1000 倍分别加 3、5、10、15、20 分。升级区间成交额除以上一次告警成交额，严格超过 5、10、20、50、100 倍分别加 3、5、10、15、20 分。</p>
+            <p><strong>异动前横盘平静度（30 分）</strong> 仅在本轮首报计算，升级沿用。回看首报异动窗口之前 {continuation.lookbackHours} 小时的 1 分钟 K 线。整体振幅 ≤5% 得 10 分、≤8% 得 5 分；前后两半平均收盘价偏移 ≤1% 得 10 分、≤2% 得 5 分；最大单根振幅 ≤1% 得 10 分、≤2% 得 5 分。各项超过上限得 0 分。基础满分 100 分，加成交额奖励最高 120 分。</p>
+            <p>首次确认告警后评估开仓，升级告警记录独立评分。总分 ≥ 80 且开启自动下单时，首报上涨做多、下跌做空，以 1 倍杠杆提交币安允许的最小市价单。首次信号有效期 45 秒。</p>
             <p>开仓成交后，后台以实际成交均价为基准，先挂标记价止损 {continuation.stopLossPercent}% 和止盈 {continuation.takeProfitPercent}%，再在止盈距离的 75% 处挂限价平多或平空。价格按合约步长校准。最长持仓 5 分钟，到期自动撤单并市价平仓。</p>
           </div>
         </section>
-        <AlertRecords records={history} canDelete={recordsReady && canEdit} onDelete={deleteAlertRecords} />
+        <AlertRecords records={history} trades={trading.data?.trades} canDelete={recordsReady && canEdit} onDelete={deleteAlertRecords} />
       </div>
     </details>
   );
@@ -718,6 +714,8 @@ export default function MarketMonitor({ contracts, coinCount, directoryError }: 
   return (
     <section id="market-alerts" className={styles.monitorPanel} aria-labelledby="market-alert-heading">
       <h2 id="market-alert-heading" className={styles.sectionTitle}>交易策略</h2>
+      <StrategyRuntimeStatus health={health} background={background}
+        browser={{ enabled, receiving: online && observedCoins > 0 }} />
       <details id="account-settings" className={styles.monitorFeature} {...accountDetails}>
         <summary className={styles.monitorSummary}><h3>账号设置</h3></summary>
         <div className={`${styles.monitorBody} ${styles.accountSettingsGrid}`}>

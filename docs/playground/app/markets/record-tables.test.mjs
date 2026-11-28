@@ -34,9 +34,55 @@ const { default: AlertRecords } = await import("./alert-records.tsx");
 const { default: TradeRecords, PositionControls } = await import("./trade-records.tsx");
 const { default: TestStrategy } = await import("./test-strategy.tsx");
 const { default: BinanceSettings } = await import("./binance-settings.tsx");
+const { default: StrategyRuntimeStatus } = await import("./strategy-runtime-status.tsx");
 const { mergeAlertHistory } = await import("../../lib/alert-history.ts");
 const { tradeExecution } = await import("../../lib/trading-types.ts");
 hooks.deregister();
+
+const runtime = {
+  health: { state: "online", lastResponse: 2000 },
+  background: { mode: "local", data: { rule: { enabled: true, continuation: { autoTrade: true } }, worker: "connected" }, readError: "" },
+  browser: { enabled: false, receiving: false },
+};
+
+function renderRuntime(props = {}) {
+  return renderToStaticMarkup(createElement(StrategyRuntimeStatus, { ...runtime, ...props }));
+}
+
+test("the runtime overview shows current backend activity and identifies the manual strategy", () => {
+  const html = renderRuntime();
+  const labels = Array.from(html.matchAll(/<dt>(.*?)<\/dt>/g), ([, label]) => label);
+  assert.deepEqual(labels, ["Rust 行情服务", "异动监控策略", "测试策略"]);
+  assert.match(html, /Rust 行情服务<\/dt><dd[^>]*>可访问/);
+  assert.match(html, /异动监控策略<\/dt><dd[^>]*>运行中 · 后台/);
+  assert.match(html, /测试策略<\/dt><dd[^>]*>手动触发/);
+  assert.match(html, /datetime="1970-01-01T00:00:02.000Z"/i);
+});
+
+test("an unavailable backend or failed status request does not present cached strategies as running", () => {
+  const offline = renderRuntime({ health: { ...runtime.health, state: "unavailable" } });
+  assert.match(offline, /无法连接 · 重试中/);
+  assert.match(offline, /异动监控策略<\/dt><dd[^>]*>状态未知/);
+  assert.doesNotMatch(offline, /运行中/);
+
+  const failedRead = renderRuntime({ background: { ...runtime.background, readError: "读取失败" } });
+  assert.match(failedRead, /Rust 行情服务<\/dt><dd[^>]*>可访问/);
+  assert.match(failedRead, /异动监控策略<\/dt><dd[^>]*>状态未知/);
+});
+
+test("worker offline, strategy stopped, and browser monitoring have distinct statuses", () => {
+  const updateBackground = (change) => ({ background: { ...runtime.background, data: { ...runtime.background.data, ...change } } });
+  const offline = renderRuntime(updateBackground({ worker: "offline" }));
+  assert.match(offline, /监控进程离线/);
+
+  const rule = { ...runtime.background.data.rule, enabled: false };
+  const stopped = renderRuntime(updateBackground({ rule, worker: "idle" }));
+  assert.match(stopped, /异动监控策略<\/dt><dd[^>]*>已停止/);
+
+  const browser = renderRuntime({ background: { mode: "browser", data: null, readError: "" },
+    browser: { enabled: true, receiving: true } });
+  assert.match(browser, /运行中 · 浏览器/);
+});
 
 const emptyRecords = { records: [], canDelete: true, onDelete: async () => {} };
 const cases = [
@@ -78,6 +124,51 @@ test("a scored alert shows the submitted direction, the three actual weights, an
   assert.match(html, /突破后走势 · 回吐后收复（门槛价 95，最后成交价 94）/);
 });
 
+test("a historical protection failure shows the rejected order, trigger price and eventual close", () => {
+  const spike = { symbol: "HAEDALUSDT", level: 3, time: 1795748456110, price: 0.02129, previous: 0.020230875,
+    change: 5.24, threshold: 5, seconds: 60, requiredMultiple: 5, status: "alerted" };
+  const roundId = "HAEDALUSDT:1:1795748456110";
+  const rejected = "Order would immediately trigger.（-2021）";
+  const records = mergeAlertHistory([], [spike], [{ event: { ...spike, roundId, continuation: {
+    status: "failed", side: "long", target: 80, error: `自动保护单设置失败：${rejected}`,
+    score: { total: 95, breakoutPoints: 35, flowPoints: 30, pricePoints: 10, turnoverPoints: 20, rangePercent: 3.75 },
+  } } }]);
+  const trade = { id: "trade", strategy: { id: "market-spike" }, symbol: spike.symbol, side: "long", roundId,
+    status: "closed", exitPrice: 0.02479, orders: [
+      { kind: "stop-loss", status: "canceled", triggerPrice: 0.01828 },
+      { kind: "take-profit", status: "failed", triggerPrice: 0.01864, error: rejected },
+      ...Array.from({ length: 4 }, () => ({ kind: "exit", status: "failed", error: "Market order rejected.（-4131）" })),
+      { kind: "exit", status: "filled" },
+    ] };
+  const otherRound = { ...trade, id: "other", roundId: "earlier", exitPrice: 0.02 };
+  const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records, trades: [otherRound, trade] }));
+  assert.match(html, /<summary>95 分 · 做多 · 开仓已成交 · 止盈挂单失败<span[^>]*>触发价 0\.01864，提交时标记价已满足触发条件，币安拒绝挂单<\/span><\/summary>/);
+  assert.match(html, /已市价平仓，成交均价 0\.02479/);
+  assert.match(html, /市价平仓有 4 次被拒，最近一次原因是对手方最优价超出币安允许的价格范围/);
+  assert.match(html, /原始错误 · 自动保护单设置失败：Order would immediately trigger\.（-2021）/);
+
+  const missingTrade = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records, trades: [otherRound] }));
+  assert.match(missingTrade, /自动保护单设置失败<span[^>]*>提交时标记价已满足触发条件/);
+  assert.doesNotMatch(missingTrade, /止盈挂单失败|已市价平仓/);
+});
+
+test("a saved failure stays readable without a score, observation or linked trade", () => {
+  const spike = { symbol: "BTCUSDT", level: 1, time: 1, price: 105, previous: 100,
+    change: 5, threshold: 5, seconds: 30, requiredMultiple: 3, status: "alerted" };
+  for (const [error, reason] of [
+    ["自动保护单设置失败：开仓已成交，止损挂单失败（触发价 104）：Order would immediately trigger.（-2021）",
+      "开仓已成交，止损挂单失败（触发价 104）：提交时标记价已满足触发条件，币安拒绝挂单"],
+    ["开仓失败：Margin is insufficient.（-2019）", "开仓失败：可用保证金不足"],
+    ["-2021", "提交时已经满足订单的触发条件，币安拒绝挂单"],
+    ["-9999", "币安返回错误码 -9999，具体原因待核对"],
+    ["开仓失败：Symbol is not ready.（-9999）", "开仓失败：Symbol is not ready.（-9999）"],
+  ]) {
+    const records = [{ ...spike, continuation: { status: "failed", error } }];
+    const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+    assert.ok(html.includes(`<span>${reason}</span></summary>`), html);
+  }
+});
+
 test("the new score shows all four weights and explains why a lost breakout skips entry", () => {
   const spike = { symbol: "BTCUSDT", level: 2, time: 1, price: 111, previous: 105, originalReference: 100, change: 5.71, threshold: 5,
     seconds: 30, requiredMultiple: 3, status: "alerted" };
@@ -88,11 +179,81 @@ test("the new score shows all four weights and explains why a lost breakout skip
   const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
   assert.match(html, /55 分 · 做多 · 突破失守，跳过下单/);
   assert.match(html, /105 \/ 111<div>原始参考价 100<\/div>/);
-  assert.match(html, /突破站稳 0\/35/);
+  assert.match(html, /走势评估 0\/35/);
   assert.match(html, /同向主动成交 35\/35/);
   assert.match(html, /成交额 20\/20/);
   assert.match(html, /历史振幅 0\/10（40\.54%）/);
   assert.doesNotMatch(html, /强平 0\/10/);
+});
+
+test("combined flow score shows its interval, notional depth and capped points", () => {
+  const spike = { symbol: "CFGUSDT", level: 2, time: 2000, price: 111, previous: 105, change: 5,
+    threshold: 3, seconds: 60, requiredMultiple: null, status: "alerted" };
+  for (const side of ["long", "short"]) {
+    const flow = {
+      start: 1001, end: 2000, buyUsdt: 700, sellUsdt: 300, alignedPercent: 70,
+      activePoints: 30, depthPercent: 80, depthPoints: 25, depthMaxPoints: 25, points: 35,
+      depth: { time: 3000, bidUsdt: 8000, askUsdt: 2000, bidLevels: 1000, askLevels: 900 },
+    };
+    const records = mergeAlertHistory([], [spike], [{ event: { ...spike, continuation: {
+      status: "evaluated", side, target: 80,
+      score: { total: 90, breakoutPoints: 35, flowPoints: 35, pricePoints: 0, turnoverPoints: 20, rangePercent: 40, flow },
+    } } }]);
+    const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+    assert.match(html, /同向主动成交 \+ 订单簿深度 35\/35/);
+    assert.match(html, /完整告警区间/);
+    assert.match(html, new RegExp(`同向主动${side === "long" ? "买入" : "卖出"} 70% · 30 分`));
+    assert.match(html, /订单簿深度补充 25\/25/);
+    assert.match(html, /买盘 1000 档/);
+    assert.match(html, /卖盘 900 档/);
+    assert.match(html, /两项合计封顶 35 分/);
+    flow.depth = null;
+    flow.depthPercent = null;
+    flow.depthPoints = 0;
+    const missing = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+    assert.match(missing, /快照不可用，补充分数为 0/);
+  }
+});
+
+test("six movement labels show the trigger, reference and worst prices alongside the saved score", () => {
+  const spike = { symbol: "CFGUSDT", level: 2, time: 2000, price: 110, previous: 100, change: 10,
+    threshold: 3, seconds: 60, requiredMultiple: null, status: "alerted" };
+  for (const [position, points, label] of [
+    ["held", 35, "突破后站稳"], ["recovered", 30, "回吐后收复"],
+    ["retained", 20, "回吐未失守"], ["half", 15, "回吐一半"],
+    ["endangered", 5, "回吐即将失守"], ["lost", 0, "失守"],
+  ]) {
+    const records = mergeAlertHistory([], [spike], [{ event: { ...spike,
+      continuation: { status: "below-score", side: "long", target: 80,
+        score: { total: points, breakoutPoints: points, flowPoints: 0, pricePoints: 0, turnoverPoints: 0, rangePercent: null } },
+      breakoutObservation: { status: "ready", windowSeconds: 5, buyUsdt: 100, sellUsdt: 100, netPercent: 0,
+        position, targetPrice: 110, referencePrice: 100, worstPrice: 99, lastPrice: 108, lastTradeTime: 7000 },
+    } }]);
+    const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+    assert.match(html, new RegExp(`突破后走势 · ${label}`));
+    assert.match(html, new RegExp(`走势评估 ${points}/35`));
+    assert.match(html, /门槛价 110/);
+    assert.match(html, /参考价 100，5 秒内最不利成交价 99/);
+  }
+});
+
+test("quietness displays all three 10 point components and the separate turnover bonus", () => {
+  const spike = { symbol: "CFGUSDT", level: 2, time: 2000, price: 110, previous: 100, change: 10,
+    threshold: 3, seconds: 60, requiredMultiple: null, status: "alerted" };
+  const records = mergeAlertHistory([], [spike], [{ event: { ...spike, continuation: {
+    status: "evaluated", side: "long", target: 80,
+    score: { total: 105, breakoutPoints: 35, flowPoints: 35, pricePoints: 25, turnoverPoints: 10,
+      rangePercent: 4, turnoverBonus: { first: false, multiple: 21, points: 10 },
+      quietness: { start: 1, end: 1000, rangePercent: 4, driftPercent: 1.5, maxCandlePercent: 0.8,
+        rangePoints: 10, driftPoints: 5, candlePoints: 10, points: 25 } },
+  } } }]);
+  const html = renderToStaticMarkup(createElement(AlertRecords, { ...emptyRecords, records }));
+  assert.match(html, /异动前横盘平静度 25\/30 · 沿用本轮首报/);
+  assert.match(html, /整体振幅 4% · 10\/10/);
+  assert.match(html, /前后平均价偏移 1.5% · 5\/10/);
+  assert.match(html, /最大单根振幅 0.8% · 10\/10/);
+  assert.match(html, /告警成交额额外加分 \+10\/20/);
+  assert.doesNotMatch(html, /历史振幅 25\/10/);
 });
 
 test("trade selection includes finished trades and protects active trades", () => {

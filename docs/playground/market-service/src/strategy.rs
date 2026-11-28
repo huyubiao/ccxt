@@ -24,8 +24,8 @@ impl Default for ObservationRule {
     fn default() -> Self {
         Self {
             minutes: 15,
-            up_percent: 5.0,
-            down_percent: 5.0,
+            up_percent: 3.0,
+            down_percent: 3.0,
         }
     }
 }
@@ -144,6 +144,7 @@ pub struct Move {
     pub previous: f64,
     pub original_reference: f64,
     pub first_trigger_time: i64,
+    pub interval_start: i64,
     pub target: f64,
     pub threshold: f64,
     pub sample: Sample,
@@ -236,6 +237,7 @@ impl Series {
             sample,
             change,
             observation_minutes: Some(rule.minutes),
+            interval_start: self.latest.sample.time + 1,
             ..self.latest
         };
         Some(self.latest)
@@ -320,14 +322,17 @@ impl PriceWindow {
             [rule.up, rule.down]
         };
         let first = directions.into_iter().flatten().find_map(|threshold| {
-            let reference = self.samples.iter().fold(sample.price, |extreme, prior| {
-                if threshold > 0.0 {
-                    extreme.min(prior.price)
+            let reference = self.samples.iter().fold(sample, |extreme, prior| {
+                if (threshold > 0.0 && prior.price <= extreme.price)
+                    || (threshold < 0.0 && prior.price >= extreme.price) {
+                    *prior
                 } else {
-                    extreme.max(prior.price)
+                    extreme
                 }
             });
-            first_move(reference, sample, threshold)
+            first_move(reference.price, sample, threshold).map(|movement| Move {
+                interval_start: reference.time, ..movement
+            })
         });
         let Some(first) = first else {
             self.samples.push_back(sample);
@@ -392,6 +397,7 @@ fn first_move(original_reference: f64, sample: Sample, threshold: f64) -> Option
         previous,
         original_reference,
         first_trigger_time: sample.time,
+        interval_start: sample.time,
         target,
         threshold,
         sample,
@@ -433,6 +439,27 @@ mod tests {
     }
 
     #[test]
+    fn full_interval_uses_latest_extreme_and_previous_alert_even_after_skipped_bands() {
+        for (prices, threshold) in [([100.0, 100.0, 106.0, 110.0], 5.0),
+            ([100.0, 100.0, 94.0, 88.0], -5.0)] {
+            let mut window = PriceWindow::default();
+            let rule = Rule { up: (threshold > 0.0).then_some(threshold),
+                down: (threshold < 0.0).then_some(threshold), ..Rule::default() };
+            window.observe(sample(1000, prices[0]), rule);
+            window.observe(sample(2000, prices[1]), rule);
+            let Some(Detection::CheckTurnover(first)) = window.observe(sample(3000, prices[2]), rule) else {
+                panic!("expected first alert");
+            };
+            assert_eq!(first.interval_start, 2000);
+            window.settle(3000, rule.observation, Some((Volume::new(Some(10.0), Some(1.0)), 4000)));
+            let Some(Detection::Confirmed(next, _)) = window.observe(sample(5000, prices[3]), rule) else {
+                panic!("expected upgrade");
+            };
+            assert_eq!(next.interval_start, 3001);
+        }
+    }
+
+    #[test]
     fn starts_observing_after_confirmation_and_ignores_earlier_upgrades() {
         let mut window = PriceWindow::default();
         let rule = Rule { down: None, ..Rule::default() };
@@ -450,18 +477,18 @@ mod tests {
         window.settle(first.sample.time, rule.observation, Some((volume, 5_000)));
         assert_eq!(window.series.as_ref().unwrap().latest, first);
         assert!(window.observe(sample(4_999, 122.0), rule).is_none());
-        assert!(window.observe(sample(99_000, 110.2499), rule).is_none());
+        assert!(window.observe(sample(99_000, 106.0899), rule).is_none());
         let Some(Detection::Confirmed(next, same_volume)) =
-            window.observe(sample(100_000, 110.25), rule)
+            window.observe(sample(100_000, 106.09), rule)
         else {
             panic!("expected the next level to keep the confirmed volume");
         };
         assert_eq!(next.level, 2);
         assert_eq!(next.first_trigger_time, first.sample.time);
         assert_eq!(next.original_reference, 100.0);
-        assert_eq!(next.threshold, 5.0);
-        assert!((next.previous - 105.0).abs() < 1e-10);
-        assert!((next.target - 110.25).abs() < 1e-10);
+        assert_eq!(next.threshold, 3.0);
+        assert!((next.previous - 103.0).abs() < 1e-10);
+        assert!((next.target - 106.09).abs() < 1e-10);
         assert_eq!(next.observation_minutes, Some(15));
         assert_eq!(same_volume, volume);
     }
@@ -577,7 +604,11 @@ mod tests {
     #[test]
     fn each_upgrade_resets_the_configured_deadline() {
         let mut window = PriceWindow::default();
-        let rule = Rule { down: None, observation: ObservationRule { minutes: 2, ..ObservationRule::default() }, ..Rule::default() };
+        let rule = Rule {
+            down: None,
+            observation: ObservationRule { minutes: 2, up_percent: 5.0, down_percent: 5.0 },
+            ..Rule::default()
+        };
         let tick = |window: &mut PriceWindow, time, price| window.observe(sample(time, price), rule);
         tick(&mut window, 1_000, 100.0);
         assert!(matches!(tick(&mut window, 2_000, 105.0), Some(Detection::CheckTurnover(_))));

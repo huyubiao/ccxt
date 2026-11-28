@@ -23,6 +23,7 @@ export type TradeOrder = {
 export type Trade = {
   id: string;
   strategy: { id: string; name: string };
+  roundId?: string;
   mode: TradingMode;
   symbol: string;
   unifiedSymbol: string;

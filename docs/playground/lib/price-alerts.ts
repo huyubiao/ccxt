@@ -10,7 +10,7 @@ export const TURNOVER_BASELINE_MINUTES = 60;
 export const ALERT_DAY_MS = 24 * 60 * 60 * 1000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const MAX_U32 = 0xffffffff;
-export const DEFAULT_ALERT_OBSERVATION = { minutes: 15, upPercent: 5, downPercent: 5 };
+export const DEFAULT_ALERT_OBSERVATION = { minutes: 15, upPercent: 3, downPercent: 3 };
 
 type Sample = { time: number; price: number };
 type LevelSample = Sample & { sampledAt?: number };

@@ -86,6 +86,6 @@ export function useBackgroundMonitor() {
     return update("DELETE", records, "无法删除告警记录。");
   }
 
-  return { mode, data, saving: mutation === "PUT", deleting: mutation === "DELETE", error: saveError || readError,
+  return { mode, data, saving: mutation === "PUT", deleting: mutation === "DELETE", error: saveError || readError, readError,
     save, deleteSpikes };
 }
