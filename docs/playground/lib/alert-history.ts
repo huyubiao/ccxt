@@ -15,6 +15,7 @@ export const spikeStatusLabels: Record<SpikeRecord["status"], string> = {
 };
 
 export type AlertHistoryRow = SpikeRecord & {
+  roundId?: string;
   legacyMultiple?: number | null;
   continuation?: ContinuationResult;
   breakoutObservation?: BreakoutObservation;
@@ -34,7 +35,7 @@ export function mergeAlertHistory(
       ? { ...row, volume: row.volume ?? confirmedRow.volume, legacyMultiple: confirmedRow.legacyMultiple,
         originalReference: row.originalReference ?? confirmedRow.originalReference,
         observationMinutes: row.observationMinutes ?? confirmedRow.observationMinutes,
-        continuation: confirmedRow.continuation, breakoutObservation: confirmedRow.breakoutObservation }
+        roundId: confirmedRow.roundId, continuation: confirmedRow.continuation, breakoutObservation: confirmedRow.breakoutObservation }
       : row);
   }
   return [...rows.values()].sort((a, b) => b.time - a.time).slice(0, SPIKE_RECORD_LIMIT);

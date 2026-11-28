@@ -341,6 +341,33 @@ impl Store {
         Ok(())
     }
 
+    pub fn round_alert(&self, round_id: &str, before: Option<i64>) -> Result<Option<Value>> {
+        let sql = if before.is_some() {
+            "SELECT event FROM monitor_alert WHERE json_extract(event,'$.roundId')=?1
+                AND json_extract(event,'$.time') < ?2 ORDER BY json_extract(event,'$.time') DESC LIMIT 1"
+        } else {
+            "SELECT event FROM monitor_alert WHERE json_extract(event,'$.roundId')=?1
+                AND ?2 IS NULL ORDER BY json_extract(event,'$.time') ASC LIMIT 1"
+        };
+        let value: Option<String> = self.db()?.query_row(sql, params![round_id, before], |row| row.get(0)).optional()?;
+        value.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    }
+
+    pub fn save_round_quietness(&self, round_id: &str, quietness: &Value) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event=json_set(event,'$.quietness',json(?2))
+            WHERE id=(SELECT id FROM monitor_alert WHERE json_extract(event,'$.roundId')=?1
+                ORDER BY json_extract(event,'$.time') ASC LIMIT 1)
+            AND json_type(event,'$.quietness') IS NULL", params![round_id, quietness.to_string()])?;
+        Ok(())
+    }
+
+    pub fn save_interval_turnover(&self, round_id: &str, time: i64, total: f64) -> Result<()> {
+        self.db()?.execute("UPDATE monitor_alert SET event=json_set(event,'$.intervalTurnover',?3)
+            WHERE json_extract(event,'$.roundId')=?1 AND json_extract(event,'$.time')=?2",
+            params![round_id, time, total])?;
+        Ok(())
+    }
+
     pub fn finish_breakout_observation(&self, id: &str, owner: &str, observation: &Value) -> Result<()> {
         self.db()?.execute("UPDATE monitor_alert SET event = json_set(event, '$.breakoutObservation', json(?))
             WHERE id = ? AND json_extract(event, '$.breakoutObservation.status') = 'pending'
@@ -625,13 +652,33 @@ mod tests {
         })).unwrap();
         assert_eq!(old.up, None);
         assert!(old.is_valid());
-        assert_eq!(old.observation, crate::strategy::ObservationRule::default());
+        assert_eq!(serde_json::to_value(old.observation).unwrap(), json!({"minutes":15,"upPercent":3.0,"downPercent":3.0}));
         assert!(!old.continuation.auto_trade);
         assert_eq!(old.continuation.lookback_hours, 24);
         assert_eq!(old.continuation.max_range_percent, 5.0);
         assert_eq!(old.continuation.turnover_multiple, 5.0);
         assert_eq!(old.continuation.stop_loss_percent, 1.0);
         assert_eq!(old.continuation.take_profit_percent, 1.0);
+    }
+
+    #[test]
+    fn first_round_quietness_is_immutable_and_previous_turnover_is_selected_by_time() {
+        let store = Store::open_memory().unwrap();
+        for (id, time, level) in [("first", 1000, 3), ("upgrade", 2000, 5), ("later", 3000, 6)] {
+            let event = json!({"roundId":"round","time":time,"level":level,"volume":{"turnover":100}});
+            store.db().unwrap().execute(
+                "INSERT INTO monitor_alert(id,event,confirmedAt,delivery,nextAttempt) VALUES(?,?,0,'disabled',0)",
+                params![id,event.to_string()]).unwrap();
+        }
+        store.save_round_quietness("round", &json!({"points":25,"start":0,"end":900})).unwrap();
+        store.save_round_quietness("round", &json!({"points":0})).unwrap();
+        assert_eq!(store.round_alert("round", None).unwrap().unwrap()["quietness"]["points"], 25);
+        store.save_interval_turnover("round", 2000, 222.0).unwrap();
+        let previous = store.round_alert("round", Some(3000)).unwrap().unwrap();
+        assert_eq!(previous["level"], 5);
+        assert_eq!(previous["intervalTurnover"], 222.0);
+        assert_eq!(store.round_alert("round", Some(2000)).unwrap().unwrap()["level"], 3);
+        assert!(store.round_alert("round", Some(1000)).unwrap().is_none());
     }
 
     #[test]

@@ -27,6 +27,7 @@ use crate::trading::Side;
 const CHECK_LIMIT: usize = 100;
 const CHECK_CONCURRENCY: usize = 2;
 const MAX_QUEUE_AGE: i64 = 15_000;
+const MAX_MARKET_QUOTE_AGE_MS: i64 = 15_000;
 const MAX_EVALUATIONS: usize = 16;
 const MAX_BREAKOUT_OBSERVATIONS: usize = 4;
 const MAX_WATCHES: usize = 20;
@@ -156,7 +157,7 @@ impl Monitor {
         let mut contracts = HashMap::new();
         let mut next_directory = 0;
         let mut next_prune = 0;
-        let mut connected = false;
+        let mut last_quote_at: Option<i64> = None;
         let mut generation = 0;
         loop {
             tokio::select! {
@@ -165,12 +166,20 @@ impl Monitor {
                     let now = now_ms();
                     let rule = self.store.rule()?;
                     let version = self.store.stop_version()?;
-                    if !self.store.heartbeat(&self.owner, if !rule.enabled { "idle" } else if connected { "connected" } else { "connecting" }, now)? { break; }
-                    if self.rule != rule || self.version != version {
+                    let rule_changed = self.rule != rule || self.version != version;
+                    let worker_state = if !rule.enabled {
+                        "idle"
+                    } else if !rule_changed && last_quote_at.is_some_and(|time| now - time < MAX_MARKET_QUOTE_AGE_MS) {
+                        "connected"
+                    } else {
+                        "connecting"
+                    };
+                    if !self.store.heartbeat(&self.owner, worker_state, now)? { break; }
+                    if rule_changed {
                         if let Some(active) = feed.take() { active.abort(); }
                         generation += 1;
                         self.clear_window(false).await?;
-                        connected = false;
+                        last_quote_at = None;
                         if self.version != version || !rule.enabled { self.watches.clear(); }
                         self.rule = rule;
                         self.version = version;
@@ -210,18 +219,15 @@ impl Monitor {
                 frame = frames.recv() => match frame {
                     Some((epoch, _)) if epoch != generation => {},
                     Some((_, Feed::Tickers(tickers))) => {
-                        if !connected {
-                            self.store.heartbeat(&self.owner, "connected", now_ms())?;
-                            connected = true;
-                        }
                         for (symbol, sample) in tickers {
                             if let Some(contract) = contracts.get(&symbol) {
                                 self.observe(contract, sample)?;
                                 self.quote_watch(&symbol, sample)?;
+                                last_quote_at = Some(last_quote_at.map_or(sample.time, |time| time.max(sample.time)));
                             }
                         }
                     }
-                    Some((_, Feed::Disconnected)) => { connected = false; self.clear_window(true).await?; }
+                    Some((_, Feed::Disconnected)) => { last_quote_at = None; self.clear_window(true).await?; }
                     None => break,
                 },
                 next = feeds.join_next_with_id(), if !feeds.is_empty() => {
@@ -368,7 +374,7 @@ impl Monitor {
         let mut event = json!({"symbol":symbol,"time":movement.sample.time,"level":movement.level,"seconds":self.rule.seconds,
             "previous":movement.previous,"originalReference":movement.original_reference,
             "price":movement.sample.price,"change":movement.change,"threshold":movement.threshold,
-            "roundId":round_id(symbol, movement)});
+            "roundId":round_id(symbol, movement),"intervalStart":movement.interval_start});
         if let Some(minutes) = movement.observation_minutes {
             event["observationMinutes"] = json!(minutes);
         }
@@ -410,7 +416,8 @@ impl Monitor {
         );
         event["kind"] = json!("market-spike");
         event["volume"] = json!(volume);
-        let evaluate = series_trigger_time.filter(|_| volume.multiple.is_some());
+        event["quietLookbackHours"] = json!(self.rule.continuation.lookback_hours);
+        let evaluate = volume.multiple.map(|_| time);
         let can_queue = self.evaluations.len() < MAX_EVALUATIONS;
         let can_observe = self.observations.len() < MAX_BREAKOUT_OBSERVATIONS;
         if evaluate.is_some() {
@@ -440,6 +447,7 @@ impl Monitor {
                 let evaluator = Arc::clone(&self.evaluator);
                 let evaluation = Evaluation {
                     id: id.clone(), round_id: round_id(symbol, movement), contract: contract.clone(), trigger_time, volume, observation,
+                    interval_start: movement.interval_start, entry_candidate: series_trigger_time.is_some(),
                     side: if threshold > 0.0 { Side::Long } else { Side::Short },
                     rule: self.rule, owner: self.owner.clone(),
                 };
@@ -684,7 +692,7 @@ fn ticker_sample(raw: &Value, now: i64) -> Option<(String, Sample)> {
     }
     let time = raw["E"].as_i64()?;
     let price = number(&raw["c"])?;
-    if !(now - 15_000..=now + 5_000).contains(&time) || !price.is_finite() || price <= 0.0 {
+    if !(now - MAX_MARKET_QUOTE_AGE_MS..=now + 5_000).contains(&time) || !price.is_finite() || price <= 0.0 {
         return None;
     }
     Some((raw["s"].as_str()?.to_owned(), Sample { time, price }))

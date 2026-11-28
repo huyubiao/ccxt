@@ -69,6 +69,7 @@ async fn main() -> store::Result<()> {
         let evaluator = Arc::new(spike_trade::Evaluator {
             store: Arc::clone(&store), binance: Arc::clone(&binance), trader,
             stop: stopped.clone(), slots: tokio::sync::Semaphore::new(2),
+            quiet_lock: tokio::sync::Mutex::new(()),
         });
         tokio::spawn(monitor::supervise(
             store,

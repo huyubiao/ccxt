@@ -19,6 +19,15 @@
 .sectionTitle { margin: 0; font-size: 20px; }
 .monitorPanel, .workspace { scroll-margin-top: 16px; }
 .monitorPanel > h2 { margin-bottom: 12px; }
+.strategyRuntime { margin-bottom: 12px; padding: 14px 16px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
+.strategyRuntime h3 { margin: 0 0 10px; font-size: 16px; }
+.strategyRuntime dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0; }
+.strategyRuntime dt, .strategyRuntime p { color: hsl(var(--muted-foreground)); font-size: 12px; }
+.strategyRuntime dd { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
+.strategyRuntime dd[data-tone="good"] { color: hsl(var(--success)); }
+.strategyRuntime dd[data-tone="wait"] { color: hsl(var(--warning)); }
+.strategyRuntime dd[data-tone="error"] { color: hsl(var(--destructive)); }
+.strategyRuntime p { margin: 12px 0 0; }
 .monitorFeature { border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); overflow: hidden; }
 .monitorSummary { padding: 14px 16px; cursor: pointer; }
 .monitorSummary h3 { display: inline; margin: 0; font-size: 16px; }
@@ -53,6 +62,7 @@
 .alertSelectAll:has(input:disabled) { cursor: default; }
 .alertContinuation { min-width: 150px; max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
 .alertContinuation summary { cursor: pointer; }
+.alertFailureReason { display: block; margin-top: 3px; color: hsl(var(--destructive)); }
 .monitorSettings { padding: 16px; }
 .monitorSettings p { margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .monitorForm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
